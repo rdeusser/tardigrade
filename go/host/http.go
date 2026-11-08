@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/api"
+	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/schema"
 )
 
