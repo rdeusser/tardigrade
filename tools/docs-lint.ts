@@ -19,6 +19,7 @@ const files = [
   "AGENTS.md",
   "CLAUDE.md",
   "CONTRIBUTING.md",
+  "go/README.md",
   ".github/PULL_REQUEST_TEMPLATE.md",
   ...pages.sort()
 ]

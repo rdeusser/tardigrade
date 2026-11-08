@@ -215,6 +215,10 @@ celld deploy --config celld.jsonc --bucket s3://actors
 
 See the [Cloudflare](docs/platforms/cloudflare.mdx) and [Celld](docs/platforms/celld.mdx) guides for configuration and credentials. For a Bun process, see the [Bun example](packages/examples/bun.ts) and [service wiring](packages/examples/services.ts).
 
+## Go
+
+[Tardigrade for Go](go/README.md) implements the same actor model in Go: durable and effect atoms, a self-hosted SQLite host with the HTTP method API, model providers, tool libraries, the agent, and the `tdg` CLI.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
