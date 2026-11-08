@@ -50,3 +50,19 @@ jobs:
         if: steps.changes.outputs.docs_only == 'true'
       - run: bun run gate
         if: steps.changes.outputs.docs_only != 'true'
+
+  go:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
