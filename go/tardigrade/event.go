@@ -15,7 +15,7 @@ type Event interface {
 	EventType() string
 }
 
-// RawEvent holds a journal event whose type no handler in this process registered. No reducer accepts it, so it cannot change state.
+// RawEvent holds a journal event whose type no handler in this process registered. No transition accepts it, so it cannot change state.
 type RawEvent struct {
 	Type string
 	Data json.RawMessage

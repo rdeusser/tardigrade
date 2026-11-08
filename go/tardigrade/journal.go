@@ -35,7 +35,7 @@ type Invocation struct {
 	Input  json.RawMessage `json:"input"`
 }
 
-// Meta is the delivery context a reducer receives with each event; Position is the zero-based journal position.
+// Meta is the delivery context a transition receives with each event; Position is the zero-based journal position.
 type Meta struct {
 	Position   int64
 	RecordedAt int64

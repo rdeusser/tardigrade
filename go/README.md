@@ -1,6 +1,6 @@
 # Tardigrade for Go
 
-Tardigrade for Go builds durable, event-driven actors in Go. It follows the model of the TypeScript framework: every event is appended to a journal, durable atoms reduce the journal into state, effect atoms propose work from that state, and the runtime executes the work and journals its outcome.
+Tardigrade for Go builds durable, event-driven actors in Go. It follows the model of the TypeScript framework: every event is appended to a journal, durable atoms fold the journal into state, effect atoms propose work from that state, and the runtime executes the work and journals its outcome.
 
 ```text
 { view, effects } = f(event log)
@@ -29,7 +29,7 @@ The module needs Go 1.27 and has one dependency, the pure Go SQLite driver `mode
 
 ## Counter actor
 
-A durable atom folds journal events into state. Each reducer, built with `tardigrade.On`, is typed by the event it accepts and registers that event type for decoding.
+A durable atom folds journal events into state. Each `tardigrade.On` declares a transition: how the state changes when one event type arrives. It is typed by that event, registers it for decoding, and returns the next state without mutating the one it receives.
 
 ```go
 type Incremented struct{}
@@ -157,7 +157,7 @@ When `TARDIGRADE_TOKEN` is set, every route except `/healthz` requires `Authoriz
 
 ## Runtime guarantees
 
-Each thread has one runtime. A commit appends an event and the events its act callbacks derive as one journal batch; when a reducer rejects the batch or the append fails, the runtime restores its registry and operation table (`tardigrade/runtime_test.go`, `TestRejectedEventLeavesStateUnchanged`). Accepted work is journaled before it runs, so a reopened journal resumes unfinished work once and records its outcome (`TestReplayResumesPendingWorkOnce`). Retries journal each attempt and its absolute wake time (`TestRetryJournalsAttempts`). Cancellation journals the decision, interrupts the work, and runs the act's cleanup until it succeeds (`TestCancellationRunsCleanup`). A panic in an act records a terminal defect and stops the actor (`TestPanicStopsActor`). Checkpoints save durable atom states while no work is active, so replay folds only later records (`TestCheckpointLimitsReplay`). A host records which threads hold unfinished work and resumes them when it opens the store (`host/host_test.go`, `TestRestartResumesActiveThreads`).
+Each thread has one runtime. A commit appends an event and the events its act callbacks derive as one journal batch; when a transition rejects the batch or the append fails, the runtime restores its registry and operation table (`tardigrade/runtime_test.go`, `TestRejectedEventLeavesStateUnchanged`). Accepted work is journaled before it runs, so a reopened journal resumes unfinished work once and records its outcome (`TestReplayResumesPendingWorkOnce`). Retries journal each attempt and its absolute wake time (`TestRetryJournalsAttempts`). Cancellation journals the decision, interrupts the work, and runs the act's cleanup until it succeeds (`TestCancellationRunsCleanup`). A panic in an act records a terminal defect and stops the actor (`TestPanicStopsActor`). Checkpoints save durable atom states while no work is active, so replay folds only later records (`TestCheckpointLimitsReplay`). A host records which threads hold unfinished work and resumes them when it opens the store (`host/host_test.go`, `TestRestartResumesActiveThreads`).
 
 Work that finishes later returns a handle, and its executor finishes it: `tardigrade.ExecutorLocal` for producers started with `tardigrade.Fork`, `tardigrade.ExecutorClock` for timers, `tardigrade.ExecutorThread` for method calls on child threads, and the host's `tardigrade.Promises` service for any other executor, which calls `Runtime.Finish`. Work finishes with a value or a `tardigrade.Failure`, and act callbacks receive that as a `tardigrade.Outcome` with `Value` and `Err`.
 
@@ -186,4 +186,4 @@ Every policy value is exported and overridable where it applies.
 
 The Go module covers the actor runtime, the self-hosted SQLite host, the HTTP method API and its client, the model providers, the tool libraries, the agent, and the CLI. Cloudflare and Celld hosting stay in TypeScript because Durable Objects are JavaScript classes. Code mode stays in TypeScript because it runs model-written JavaScript; the Go agent calls tools directly. The Go runtime keeps act inputs at or above `tardigrade.DefaultInputDigestMinBytes` beside the journal until their work completes, and keeps file content inline in events.
 
-Event types evolve through Go's `encoding/json`: a type that reads an older shape implements `UnmarshalJSON`. Journal records whose event type no process registered decode as `tardigrade.RawEvent`, which no reducer accepts.
+Event types evolve through Go's `encoding/json`: a type that reads an older shape implements `UnmarshalJSON`. Journal records whose event type no process registered decode as `tardigrade.RawEvent`, which no transition accepts.
