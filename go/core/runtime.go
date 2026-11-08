@@ -111,8 +111,8 @@ type Options struct {
 	Promises Promises
 	// Publish receives execution updates.
 	Publish func(Update)
-	// OnRecord observes each committed record.
-	OnRecord func(position int64, record Record)
+	// OnCommit observes each committed batch with the count of unfinished work after it. It runs under the runtime's lock and must not call the runtime.
+	OnCommit func(position int64, records []Record, active int)
 	// Created is appended as the first record of an empty journal.
 	Created *ThreadCreated
 }
@@ -509,10 +509,10 @@ func (rt *Runtime) commit(entries []Record) error {
 	for _, key := range completed {
 		delete(rt.ops, key)
 	}
-	for i, record := range records {
-		if rt.opts.OnRecord != nil {
-			rt.opts.OnRecord(priorView.length+int64(i), record)
-		}
+	if rt.opts.OnCommit != nil {
+		rt.opts.OnCommit(priorView.length, records, len(rt.ops))
+	}
+	for _, record := range records {
 		rt.react(record.Event)
 	}
 	rt.notify()

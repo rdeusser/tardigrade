@@ -223,6 +223,15 @@ type ThreadCoordinate struct {
 	Thread   string `json:"thread"`
 }
 
+// ThreadInfo is a thread directory entry.
+type ThreadInfo struct {
+	Address   ThreadCoordinate `json:"address"`
+	Parent    string           `json:"parent,omitempty"`
+	Depth     int              `json:"depth"`
+	CreatedAt int64            `json:"createdAt"`
+	Active    bool             `json:"active"`
+}
+
 // ThreadCreated is the first record of a thread's journal.
 type ThreadCreated struct {
 	Address ThreadCoordinate  `json:"address"`
