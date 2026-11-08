@@ -410,4 +410,3 @@ func Agents(d Delegator, input func(message string) any) Library {
 		}, Named("cancel_agent"), Hints(Annotations{DestructiveHint: Bool(true), IdempotentHint: Bool(true)})),
 	)
 }
-
