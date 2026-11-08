@@ -21,6 +21,9 @@ import (
 // DefaultPollInterval spaces Await's state reads.
 const DefaultPollInterval = 250 * time.Millisecond
 
+// MaxEventBytes bounds one line of a host's event stream.
+const MaxEventBytes = 16 << 20
+
 // Client calls one host. The zero HTTP uses http.DefaultClient.
 type Client struct {
 	BaseURL string
@@ -200,7 +203,7 @@ func (c *Client) stream(ctx context.Context, path string, visit func([]byte) err
 		return &api.Error{Status: response.StatusCode, Message: "stream " + path + ": " + response.Status}
 	}
 	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 0, 64<<10), 16<<20)
+	scanner.Buffer(make([]byte, 0, 64<<10), MaxEventBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if data, ok := strings.CutPrefix(line, "data: "); ok {

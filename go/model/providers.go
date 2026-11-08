@@ -27,6 +27,12 @@ type call struct {
 	idle           time.Duration
 }
 
+// MaxEventBytes bounds one line of a provider's event stream, and MaxErrorBytes the rejection body kept in HTTPError.
+const (
+	MaxEventBytes = 16 << 20
+	MaxErrorBytes = 64 << 10
+)
+
 var errStreamStalled = errors.New("provider stream stalled")
 
 // stream posts body and calls visit with each SSE event name and data, bounding the wait for the first and each later chunk.
@@ -68,11 +74,11 @@ func (c call) stream(ctx context.Context, path string, header http.Header, body 
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 300 {
-		detail, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, MaxErrorBytes))
 		return &HTTPError{Status: response.StatusCode, Body: strings.TrimSpace(string(detail))}
 	}
 	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 0, 64<<10), 16<<20)
+	scanner.Buffer(make([]byte, 0, 64<<10), MaxEventBytes)
 	event := ""
 	for scanner.Scan() {
 		touch()
