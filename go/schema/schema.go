@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"sort"
 	"strings"
@@ -50,7 +51,7 @@ func validate(value any) error {
 }
 
 func typeName[T any]() string {
-	t := reflect.TypeOf((*T)(nil)).Elem()
+	t := reflect.TypeFor[T]()
 	if t.Name() == "" {
 		return "input"
 	}
@@ -59,7 +60,7 @@ func typeName[T any]() string {
 
 // Of returns the JSON Schema describing T's JSON encoding.
 func Of[T any]() json.RawMessage {
-	raw, err := json.Marshal(For(reflect.TypeOf((*T)(nil)).Elem()))
+	raw, err := json.Marshal(For(reflect.TypeFor[T]()))
 	if err != nil {
 		panic(err)
 	}
@@ -72,8 +73,8 @@ func For(t reflect.Type) map[string]any {
 }
 
 var (
-	rawMessage = reflect.TypeOf(json.RawMessage{})
-	describer  = reflect.TypeOf((*Describer)(nil)).Elem()
+	rawMessage = reflect.TypeFor[json.RawMessage]()
+	describer  = reflect.TypeFor[Describer]()
 )
 
 func build(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
@@ -123,8 +124,7 @@ func build(t reflect.Type, visiting map[reflect.Type]bool) map[string]any {
 }
 
 func fields(t reflect.Type, visiting map[reflect.Type]bool, properties map[string]any, required *[]string) {
-	for i := range t.NumField() {
-		field := t.Field(i)
+	for field := range t.Fields() {
 		if !field.IsExported() {
 			continue
 		}
@@ -155,10 +155,7 @@ func fields(t reflect.Type, visiting map[reflect.Type]bool, properties map[strin
 }
 
 func withKey(schema map[string]any, key string, value any) map[string]any {
-	copied := make(map[string]any, len(schema)+1)
-	for k, v := range schema {
-		copied[k] = v
-	}
+	copied := maps.Clone(schema)
 	copied[key] = value
 	return copied
 }

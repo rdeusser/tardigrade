@@ -7,15 +7,20 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/model"
 	"github.com/rdeusser/tardigrade/go/schema"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
-// Execution modes of a tool.
+// Mode is how a tool returns its result.
+type Mode string
+
+// Tool modes.
 const (
-	Foreground = "foreground"
-	Background = "background"
+	// Foreground tools return their result to the model directly.
+	Foreground Mode = "foreground"
+	// Background tools return a durable handle; the result reaches the agent as a later turn.
+	Background Mode = "background"
 )
 
 // Annotations are MCP-compatible behaviour hints; adapters do not enforce permissions from them.
@@ -35,13 +40,13 @@ type Spec struct {
 	InputSchema      json.RawMessage `json:"inputSchema"`
 	OutputSchema     json.RawMessage `json:"outputSchema,omitempty"`
 	Annotations      *Annotations    `json:"annotations,omitempty"`
-	Execution        string          `json:"execution"`
+	Execution        Mode            `json:"execution"`
 	PromiseTimeoutMs int64           `json:"promiseTimeoutMs,omitempty"`
 }
 
 // Call is the context of one tool invocation.
 type Call struct {
-	X      *core.Execution
+	X      *tardigrade.Execution
 	CallID string
 	Name   string
 }
@@ -52,15 +57,15 @@ type Content []model.Part
 // Output is a tool's result: content for the model, or a handle when the tool runs in the background.
 type Output struct {
 	Content Content
-	Handle  *core.Handle
-	Options core.PromiseOptions
+	Handle  *tardigrade.Handle
+	Options tardigrade.PromiseOptions
 }
 
 // Method is one tool of a library.
 type Method struct {
 	Spec   Spec
 	run    func(c Call, input json.RawMessage) (Output, error)
-	cancel func(c core.Cleanup, call Call) error
+	cancel func(c tardigrade.Cleanup, call Call) error
 }
 
 // Library groups methods under a name.
@@ -85,12 +90,9 @@ func PromiseTimeout(d time.Duration) Option {
 }
 
 // OnCancel releases a background tool's external work after cancellation.
-func OnCancel(cancel func(c core.Cleanup, call Call) error) Option {
+func OnCancel(cancel func(c tardigrade.Cleanup, call Call) error) Option {
 	return func(m *Method) { m.cancel = cancel }
 }
-
-// Bool returns a pointer for annotation fields.
-func Bool(v bool) *bool { return &v }
 
 // Tool defines a foreground method whose result returns to the model directly.
 func Tool[I, O any](name, description string, run func(c Call, in I) (O, error), options ...Option) Method {
@@ -114,7 +116,7 @@ func Tool[I, O any](name, description string, run func(c Call, in I) (O, error),
 }
 
 // Task defines a background method that returns a durable handle; its result reaches the agent as a later turn.
-func Task[I any](name, description string, submit func(c Call, in I) (core.Handle, error), options ...Option) Method {
+func Task[I any](name, description string, submit func(c Call, in I) (tardigrade.Handle, error), options ...Option) Method {
 	m := Method{Spec: Spec{Method: name, Description: description, InputSchema: schema.Of[I](), Execution: Background}}
 	m.run = func(c Call, input json.RawMessage) (Output, error) {
 		in, err := schema.Decode[I](input)
@@ -125,7 +127,7 @@ func Task[I any](name, description string, submit func(c Call, in I) (core.Handl
 		if err != nil {
 			return Output{}, err
 		}
-		return Output{Handle: &handle, Options: core.PromiseOptions{Timeout: time.Duration(m.Spec.PromiseTimeoutMs) * time.Millisecond}}, nil
+		return Output{Handle: &handle, Options: tardigrade.PromiseOptions{Timeout: time.Duration(m.Spec.PromiseTimeoutMs) * time.Millisecond}}, nil
 	}
 	for _, option := range options {
 		option(&m)
@@ -138,13 +140,13 @@ func render(value any) (Content, error) {
 	case Content:
 		return v, nil
 	case string:
-		return Content{{Type: "text", Text: v}}, nil
+		return Content{{Type: model.PartText, Text: v}}, nil
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	return Content{{Type: "text", Text: string(data)}}, nil
+	return Content{{Type: model.PartText, Text: string(data)}}, nil
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
@@ -206,7 +208,7 @@ func (r Registry) Run(c Call, input json.RawMessage) (Output, error) {
 }
 
 // Cancel releases a cancelled tool call's external work.
-func (r Registry) Cancel(c core.Cleanup, call Call) error {
+func (r Registry) Cancel(c tardigrade.Cleanup, call Call) error {
 	if m, ok := r[call.Name]; ok && m.cancel != nil {
 		return m.cancel(c, call)
 	}

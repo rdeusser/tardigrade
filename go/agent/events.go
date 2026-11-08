@@ -4,9 +4,9 @@ package agent
 import (
 	"encoding/json"
 
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/library"
 	"github.com/rdeusser/tardigrade/go/model"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 // InvocationRef identifies the method call that started a turn.
@@ -15,21 +15,24 @@ type InvocationRef struct {
 	ID     string `json:"id"`
 }
 
+// Source is who started a turn.
+type Source string
+
 // Turn sources.
 const (
-	SourceUser  = "user"
-	SourceAgent = "agent"
-	SourceTool  = "tool"
+	SourceUser  Source = "user"
+	SourceAgent Source = "agent"
+	SourceTool  Source = "tool"
 )
 
 // TurnRequested asks the agent for a reply.
 type TurnRequested struct {
-	TurnID     string         `json:"turnId"`
-	Text       string         `json:"text"`
-	Content    []model.Part   `json:"content,omitempty"`
-	Invocation *InvocationRef `json:"invocationRef,omitempty"`
-	Source     string         `json:"source,omitempty"`
-	PromiseRef *core.Ref      `json:"promiseRef,omitempty"`
+	TurnID     string          `json:"turnId"`
+	Text       string          `json:"text"`
+	Content    []model.Part    `json:"content,omitempty"`
+	Invocation *InvocationRef  `json:"invocationRef,omitempty"`
+	Source     Source          `json:"source,omitempty"`
+	PromiseRef *tardigrade.Ref `json:"promiseRef,omitempty"`
 }
 
 // ModelConfigured records the model the agent calls.
@@ -38,15 +41,20 @@ type ModelConfigured struct {
 	ContextWindowTokens int       `json:"contextWindowTokens"`
 }
 
+// Purpose is why the agent called a model.
+type Purpose string
+
 // Model call purposes.
 const (
-	PurposeInference  = "inference"
-	PurposeCompaction = "compaction"
+	// PurposeInference is a call that answers a turn.
+	PurposeInference Purpose = "inference"
+	// PurposeCompaction is a call that summarizes older messages.
+	PurposeCompaction Purpose = "compaction"
 )
 
 // ModelCalled records acceptance of a model call. Compaction calls carry Through, the message count the summary will cover.
 type ModelCalled struct {
-	Purpose             string    `json:"purpose"`
+	Purpose             Purpose   `json:"purpose"`
 	Model               model.Ref `json:"model"`
 	ContextWindowTokens int       `json:"contextWindowTokens"`
 	TurnID              string    `json:"turnId,omitempty"`
@@ -64,7 +72,7 @@ type ToolCall struct {
 
 // ModelReturned records a model reply.
 type ModelReturned struct {
-	Purpose      string              `json:"purpose"`
+	Purpose      Purpose             `json:"purpose"`
 	TurnID       string              `json:"turnId,omitempty"`
 	CallID       string              `json:"callId"`
 	Text         string              `json:"text"`
@@ -108,19 +116,22 @@ type ToolReturned struct {
 	Promise *library.Promise `json:"promise,omitempty"`
 }
 
+// Outcome is how a turn ended.
+type Outcome string
+
 // Turn outcomes.
 const (
-	OutcomeCompleted = "completed"
-	OutcomeFailed    = "failed"
-	OutcomeCancelled = "cancelled"
+	OutcomeCompleted Outcome = "completed"
+	OutcomeFailed    Outcome = "failed"
+	OutcomeCancelled Outcome = "cancelled"
 )
 
-// TurnSettled ends a turn. A completed turn names the reply in CallID; other outcomes carry Reason.
-type TurnSettled struct {
-	TurnID  string `json:"turnId"`
-	Outcome string `json:"outcome"`
-	CallID  string `json:"callId,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+// TurnFinished ends a turn. A completed turn names the reply in CallID; other outcomes carry Reason.
+type TurnFinished struct {
+	TurnID  string  `json:"turnId"`
+	Outcome Outcome `json:"outcome"`
+	CallID  string  `json:"callId,omitempty"`
+	Reason  string  `json:"reason,omitempty"`
 }
 
 // AbortRequested asks the turn of an invocation to stop.
@@ -129,23 +140,27 @@ type AbortRequested struct {
 	Reason     string        `json:"reason"`
 }
 
+// PermissionMode decides whether an action runs.
+type PermissionMode string
+
 // Permission modes.
 const (
-	Allow = "allow"
-	Deny  = "deny"
-	Ask   = "ask"
+	Allow PermissionMode = "allow"
+	Deny  PermissionMode = "deny"
+	// Ask sends the decision to Services.Permission.
+	Ask PermissionMode = "ask"
 )
 
 // PermissionRule sets modes for one action: per resource, for read-only resources, and by default.
 type PermissionRule struct {
-	Default   string            `json:"default,omitempty"`
-	Resources map[string]string `json:"resources"`
-	ReadOnly  string            `json:"readOnly,omitempty"`
+	Default   PermissionMode            `json:"default,omitempty"`
+	Resources map[string]PermissionMode `json:"resources"`
+	ReadOnly  PermissionMode            `json:"readOnly,omitempty"`
 }
 
 // PermissionPolicy sets the mode of each action; "tool.execute" governs tool calls with tool names as resources.
 type PermissionPolicy struct {
-	Default string                    `json:"default"`
+	Default PermissionMode            `json:"default"`
 	Actions map[string]PermissionRule `json:"actions"`
 }
 
@@ -172,11 +187,22 @@ type PermissionResolved struct {
 	Decision  Decision `json:"decision"`
 }
 
-// BudgetPolicy limits a metric per turn. RequestTool names a tool the model calls to ask for more; OnExhausted "deny" refuses further calls and "wait" asks for more.
+// Exhaustion is what a budget does once it runs out.
+type Exhaustion string
+
+// Exhaustion behaviours.
+const (
+	// ExhaustedWait blocks further counted calls until a BudgetResolved grants more.
+	ExhaustedWait Exhaustion = "wait"
+	// ExhaustedDeny refuses further counted calls and offers the model no tools.
+	ExhaustedDeny Exhaustion = "deny"
+)
+
+// BudgetPolicy limits a metric per turn. RequestTool names a tool the model calls to ask for more; OnExhausted chooses what happens when none is left, and the zero value waits.
 type BudgetPolicy struct {
-	Limit       int    `json:"limit"`
-	RequestTool string `json:"requestTool,omitempty"`
-	OnExhausted string `json:"onExhausted,omitempty"`
+	Limit       int        `json:"limit"`
+	RequestTool string     `json:"requestTool,omitempty"`
+	OnExhausted Exhaustion `json:"onExhausted,omitempty"`
 }
 
 // BudgetDecision grants Additional units or refuses with Reason.
@@ -213,7 +239,7 @@ func (ModelFailed) EventType() string          { return "ModelFailed" }
 func (CompactionFailed) EventType() string     { return "CompactionFailed" }
 func (ToolCalled) EventType() string           { return "ToolCalled" }
 func (ToolReturned) EventType() string         { return "ToolReturned" }
-func (TurnSettled) EventType() string          { return "TurnSettled" }
+func (TurnFinished) EventType() string         { return "TurnFinished" }
 func (AbortRequested) EventType() string       { return "AbortRequested" }
 func (PermissionConfigured) EventType() string { return "PermissionConfigured" }
 func (PermissionUpdated) EventType() string    { return "PermissionUpdated" }

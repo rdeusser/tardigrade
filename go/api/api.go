@@ -1,7 +1,11 @@
 // Package api defines the JSON shapes of the HTTP method API shared by hosts and clients.
 package api
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/rdeusser/tardigrade/go/tardigrade"
+)
 
 // Row is one journal record as the events routes return it; Seq is one-based.
 type Row struct {
@@ -27,10 +31,10 @@ type Metadata struct {
 
 // CallState is a method call's state with its identity.
 type CallState struct {
-	ID     string          `json:"id"`
-	Method string          `json:"method"`
-	Status string          `json:"status"`
-	Output json.RawMessage `json:"output,omitempty"`
-	Error  string          `json:"error,omitempty"`
-	Reason string          `json:"reason,omitempty"`
+	ID     string                `json:"id"`
+	Method string                `json:"method"`
+	Status tardigrade.CallStatus `json:"status"`
+	Output json.RawMessage       `json:"output,omitempty"`
+	Error  string                `json:"error,omitempty"`
+	Reason string                `json:"reason,omitempty"`
 }

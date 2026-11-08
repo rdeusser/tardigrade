@@ -3,6 +3,7 @@ package host_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
@@ -10,10 +11,10 @@ import (
 	"time"
 
 	"github.com/rdeusser/tardigrade/go/client"
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/host"
 	"github.com/rdeusser/tardigrade/go/reactive"
 	"github.com/rdeusser/tardigrade/go/sqlite"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 type Asked struct {
@@ -39,15 +40,13 @@ type relayState struct {
 	Answers map[string]string `json:"answers"`
 }
 
-var relay = core.DurableAtom("relay.state", relayState{},
-	core.On(func(s relayState, e Asked, m core.Meta) relayState {
+var relay = tardigrade.DurableAtom("relay.state", relayState{},
+	tardigrade.On(func(s relayState, e Asked, m tardigrade.Meta) relayState {
 		return relayState{Open: append(slices.Clone(s.Open), question{ID: e.ID, Depth: e.Depth, At: m.Position}), Answers: s.Answers}
 	}),
-	core.On(func(s relayState, e Answered, _ core.Meta) relayState {
+	tardigrade.On(func(s relayState, e Answered, _ tardigrade.Meta) relayState {
 		answers := map[string]string{e.ID: e.Answer}
-		for k, v := range s.Answers {
-			answers[k] = v
-		}
+		maps.Copy(answers, s.Answers)
 		open := slices.DeleteFunc(slices.Clone(s.Open), func(q question) bool { return q.ID == e.ID })
 		return relayState{Open: open, Answers: answers}
 	}),
@@ -58,61 +57,63 @@ type askInput struct {
 }
 
 var (
-	Delegate = core.NewAct[askInput, string]("relay.delegate")
-	Answer   = core.NewAct[askInput, string]("relay.answer")
+	Delegate = tardigrade.NewAct[askInput, string]("relay.delegate")
+	Answer   = tardigrade.NewAct[askInput, string]("relay.answer")
 )
 
-var relayRoot = core.EffectAtom(func(g reactive.Getter) core.Output[int] {
-	state := core.Get(g, relay)
-	acts := map[string]core.Proposal{}
+var relayRoot = tardigrade.EffectAtom(func(g reactive.Getter) tardigrade.Output[int] {
+	state := tardigrade.Get(g, relay)
+	acts := map[string]tardigrade.Proposal{}
 	for _, q := range state.Open {
 		act := Answer
 		if q.Depth > 0 {
 			act = Delegate
 		}
 		id := q.ID
-		acts[q.ID] = act.Request(core.Request[askInput, string]{Origin: core.At(q.At), Input: askInput{Depth: q.Depth},
-			OnSettled: func(o core.Outcome[string], _ core.Ref) []core.Event {
-				if o.Reason != nil {
-					return []core.Event{Answered{ID: id, Answer: "error: " + o.Reason.Message}}
+		acts[q.ID] = act.Request(tardigrade.Request[askInput, string]{Origin: new(q.At), Input: askInput{Depth: q.Depth},
+			OnFinished: func(o tardigrade.Outcome[string], _ tardigrade.Ref) []tardigrade.Event {
+				if o.Err != nil {
+					return []tardigrade.Event{Answered{ID: id, Answer: "error: " + o.Err.Message}}
 				}
-				return []core.Event{Answered{ID: id, Answer: o.Value}}
+				return []tardigrade.Event{Answered{ID: id, Answer: o.Value}}
 			}})
 	}
-	return core.Output[int]{View: len(state.Open), Acts: acts}
+	return tardigrade.Output[int]{View: len(state.Open), Acts: acts}
 })
 
-var relayActor = core.DefineActor("relay", relayRoot, map[string]core.Method{
-	"ask": core.NewMethod(core.MethodSpec[askInput, string]{
-		OnReceive: func(in askInput, c core.MethodContext) core.Event { return Asked{ID: c.ID, Depth: in.Depth} },
-		Result: func(_ askInput, g reactive.Getter, c core.MethodContext) *core.MethodResult[string] {
-			if answer, ok := core.Get(g, relay).Answers[c.ID]; ok {
-				return core.Completed(answer)
+var relayActor = tardigrade.DefineActor("relay", relayRoot, map[string]tardigrade.Method{
+	"ask": tardigrade.NewMethod(tardigrade.MethodSpec[askInput, string]{
+		OnReceive: func(in askInput, c tardigrade.MethodContext) tardigrade.Event {
+			return Asked{ID: c.ID, Depth: in.Depth}
+		},
+		Result: func(_ askInput, g reactive.Getter, c tardigrade.MethodContext) *tardigrade.MethodResult[string] {
+			if answer, ok := tardigrade.Get(g, relay).Answers[c.ID]; ok {
+				return tardigrade.Completed(answer)
 			}
 			return nil
 		},
 	}),
 })
 
-func relayActs(release <-chan struct{}) func(h *host.Host, address core.ThreadCoordinate) []core.Implementation {
-	return func(h *host.Host, address core.ThreadCoordinate) []core.Implementation {
-		return []core.Implementation{
-			Delegate.Implement(func(x *core.Execution, in askInput) (core.Result[string], error) {
+func relayActs(release <-chan struct{}) func(h *host.Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler {
+	return func(h *host.Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler {
+		return []tardigrade.Handler{
+			Delegate.Handle(func(x *tardigrade.Execution, in askInput) (tardigrade.Result[string], error) {
 				handle, err := h.Delegate(x.Address(), x.Ref(), "ask", askInput{Depth: in.Depth - 1})
 				if err != nil {
-					return core.Result[string]{}, err
+					return tardigrade.Result[string]{}, err
 				}
-				return core.Defer[string](handle, core.PromiseOptions{Timeout: core.NoDeadline}), nil
+				return tardigrade.Defer[string](handle, tardigrade.PromiseOptions{Timeout: tardigrade.NoDeadline}), nil
 			}, nil),
-			Answer.Implement(func(x *core.Execution, in askInput) (core.Result[string], error) {
+			Answer.Handle(func(x *tardigrade.Execution, in askInput) (tardigrade.Result[string], error) {
 				if release != nil {
 					select {
 					case <-release:
 					case <-x.Context().Done():
-						return core.Result[string]{}, x.Context().Err()
+						return tardigrade.Result[string]{}, x.Context().Err()
 					}
 				}
-				return core.Value(fmt.Sprintf("answered at %s", address.Thread)), nil
+				return tardigrade.Value(fmt.Sprintf("answered at %s", address.Thread)), nil
 			}, nil),
 		}
 	}
@@ -124,7 +125,7 @@ func start(t *testing.T, path string, release <-chan struct{}) (*host.Host, *cli
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := host.New(host.Options{Actor: relayActor, Store: store, Acts: relayActs(release)})
+	h, err := host.New(host.Options{Actor: relayActor, Store: store, Handlers: relayActs(release)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +153,7 @@ func TestDelegationSettlesThroughChildThreads(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, err := c.Await(ctx, thread, "ask", "q1", 10*time.Millisecond)
-	if err != nil || state.Status != core.StatusCompleted || string(state.Output) != `"answered at root.2.2"` {
+	if err != nil || state.Status != tardigrade.StatusCompleted || string(state.Output) != `"answered at root.2.2"` {
 		t.Fatalf("state = %+v, %v", state, err)
 	}
 	threads, err := c.Threads(ctx, "main")
@@ -178,7 +179,7 @@ func TestRestartResumesActiveThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := host.New(host.Options{Actor: relayActor, Store: store, Acts: relayActs(blocked)})
+	h, err := host.New(host.Options{Actor: relayActor, Store: store, Handlers: relayActs(blocked)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,7 @@ func TestRestartResumesActiveThreads(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt, _ := h.Thread("main", "root")
-	if err := rt.Invoke("ask", "q1", core.Sender{Kind: "external", ID: "test"}, []byte(`{"depth":0}`)); err != nil {
+	if err := rt.Invoke("ask", "q1", tardigrade.Sender{Kind: "external", ID: "test"}, []byte(`{"depth":0}`)); err != nil {
 		t.Fatal(err)
 	}
 	h.Close()
@@ -197,8 +198,8 @@ func TestRestartResumesActiveThreads(t *testing.T) {
 	resumed, c := start(t, path, released)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	state, err := c.Await(ctx, core.ThreadCoordinate{Instance: "main", Thread: "root"}, "ask", "q1", 10*time.Millisecond)
-	if err != nil || state.Status != core.StatusCompleted {
+	state, err := c.Await(ctx, tardigrade.ThreadCoordinate{Instance: "main", Thread: "root"}, "ask", "q1", 10*time.Millisecond)
+	if err != nil || state.Status != tardigrade.StatusCompleted {
 		t.Fatalf("state = %+v, %v", state, err)
 	}
 	if err := resumed.WaitIdle(5 * time.Second); err != nil {

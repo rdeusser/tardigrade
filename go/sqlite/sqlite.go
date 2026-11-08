@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/rdeusser/tardigrade/go/core"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 	_ "modernc.org/sqlite"
 )
 
@@ -61,7 +61,7 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 // CreateThread records a thread unless it exists and reports whether it was created.
-func (s *Store) CreateThread(info core.ThreadInfo) (bool, error) {
+func (s *Store) CreateThread(info tardigrade.ThreadInfo) (bool, error) {
 	var parent any
 	if info.Parent != "" {
 		parent = info.Parent
@@ -76,9 +76,9 @@ func (s *Store) CreateThread(info core.ThreadInfo) (bool, error) {
 }
 
 // Thread returns a directory entry or nil when the thread does not exist.
-func (s *Store) Thread(address core.ThreadCoordinate) (*core.ThreadInfo, error) {
+func (s *Store) Thread(address tardigrade.ThreadCoordinate) (*tardigrade.ThreadInfo, error) {
 	row := s.db.QueryRow(`SELECT parent, depth, created_at, active FROM threads WHERE actor = ? AND instance = ? AND thread = ?`, address.Actor, address.Instance, address.Thread)
-	info := core.ThreadInfo{Address: address}
+	info := tardigrade.ThreadInfo{Address: address}
 	var parent sql.NullString
 	if err := row.Scan(&parent, &info.Depth, &info.CreatedAt, &info.Active); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -91,15 +91,15 @@ func (s *Store) Thread(address core.ThreadCoordinate) (*core.ThreadInfo, error) 
 }
 
 // Threads lists an instance's threads in creation order; an empty instance lists every instance.
-func (s *Store) Threads(actor, instance string) ([]core.ThreadInfo, error) {
+func (s *Store) Threads(actor, instance string) ([]tardigrade.ThreadInfo, error) {
 	rows, err := s.db.Query(`SELECT instance, thread, parent, depth, created_at, active FROM threads WHERE actor = ? AND (? = '' OR instance = ?) ORDER BY created_at, thread`, actor, instance, instance)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var threads []core.ThreadInfo
+	var threads []tardigrade.ThreadInfo
 	for rows.Next() {
-		info := core.ThreadInfo{Address: core.ThreadCoordinate{Actor: actor}}
+		info := tardigrade.ThreadInfo{Address: tardigrade.ThreadCoordinate{Actor: actor}}
 		var parent sql.NullString
 		if err := rows.Scan(&info.Address.Instance, &info.Address.Thread, &parent, &info.Depth, &info.CreatedAt, &info.Active); err != nil {
 			return nil, err
@@ -111,13 +111,13 @@ func (s *Store) Threads(actor, instance string) ([]core.ThreadInfo, error) {
 }
 
 // SetActive records whether a thread holds unfinished work, so a restarted host resumes it.
-func (s *Store) SetActive(address core.ThreadCoordinate, active bool) error {
+func (s *Store) SetActive(address tardigrade.ThreadCoordinate, active bool) error {
 	_, err := s.db.Exec(`UPDATE threads SET active = ? WHERE actor = ? AND instance = ? AND thread = ?`, active, address.Actor, address.Instance, address.Thread)
 	return err
 }
 
 // Journal returns the journal of one thread.
-func (s *Store) Journal(address core.ThreadCoordinate) core.Journal {
+func (s *Store) Journal(address tardigrade.ThreadCoordinate) tardigrade.Journal {
 	return &journal{db: s.db, key: []any{address.Actor, address.Instance, address.Thread}}
 }
 
@@ -138,13 +138,13 @@ func (j *journal) Length() (int64, error) {
 	return length, err
 }
 
-func (j *journal) Read(from, to int64) ([]core.Record, error) {
+func (j *journal) Read(from, to int64) ([]tardigrade.Record, error) {
 	rows, err := j.db.Query(`SELECT seq, record FROM events`+where+` AND seq >= ? AND seq < ? ORDER BY seq`, j.args(from, to)...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	records := make([]core.Record, 0, max(to-from, 0))
+	records := make([]tardigrade.Record, 0, max(to-from, 0))
 	for rows.Next() {
 		var seq int64
 		var data []byte
@@ -154,7 +154,7 @@ func (j *journal) Read(from, to int64) ([]core.Record, error) {
 		if seq != from+int64(len(records)) {
 			return nil, fmt.Errorf("journal: position %d is missing", from+int64(len(records)))
 		}
-		var record core.Record
+		var record tardigrade.Record
 		if err := json.Unmarshal(data, &record); err != nil {
 			return nil, fmt.Errorf("journal: position %d: %w", seq, err)
 		}
@@ -176,7 +176,7 @@ func origin(o *int64) int64 {
 	return *o
 }
 
-func (j *journal) Append(expected int64, records []core.Record, changes core.Changes) (err error) {
+func (j *journal) Append(expected int64, records []tardigrade.Record, changes tardigrade.Changes) (err error) {
 	tx, err := j.db.Begin()
 	if err != nil {
 		return err
@@ -191,7 +191,7 @@ func (j *journal) Append(expected int64, records []core.Record, changes core.Cha
 		return err
 	}
 	if length != expected {
-		return core.ErrConflict
+		return tardigrade.ErrConflict
 	}
 	for i, record := range records {
 		data, err := json.Marshal(record)
@@ -206,7 +206,7 @@ func (j *journal) Append(expected int64, records []core.Record, changes core.Cha
 		if _, err := tx.Exec(`INSERT INTO events (actor, instance, thread, seq, record, message_id) VALUES (?, ?, ?, ?, ?, ?)`, j.args(position, string(data), message)...); err != nil {
 			return err
 		}
-		if request, ok := record.Event.(core.EffectRequested); ok {
+		if request, ok := record.Event.(tardigrade.EffectRequested); ok {
 			ref, _ := json.Marshal(request.Ref)
 			if _, err := tx.Exec(`INSERT INTO invocations (actor, instance, thread, atom, act, origin, ref) VALUES (?, ?, ?, ?, ?, ?, ?)`, j.args(request.Ref.Atom, request.Ref.Act, origin(request.Origin), string(ref))...); err != nil {
 				return err
@@ -226,7 +226,7 @@ func (j *journal) Append(expected int64, records []core.Record, changes core.Cha
 	return tx.Commit()
 }
 
-func (j *journal) Message(id string) (*core.Record, int64, error) {
+func (j *journal) Message(id string) (*tardigrade.Record, int64, error) {
 	var seq int64
 	var data []byte
 	err := j.db.QueryRow(`SELECT seq, record FROM events`+where+` AND message_id = ?`, j.args(id)...).Scan(&seq, &data)
@@ -236,14 +236,14 @@ func (j *journal) Message(id string) (*core.Record, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	var record core.Record
+	var record tardigrade.Record
 	if err := json.Unmarshal(data, &record); err != nil {
 		return nil, 0, err
 	}
 	return &record, seq, nil
 }
 
-func (j *journal) Invocation(identity core.Identity) (*core.Ref, error) {
+func (j *journal) Invocation(identity tardigrade.Identity) (*tardigrade.Ref, error) {
 	var data []byte
 	err := j.db.QueryRow(`SELECT ref FROM invocations`+where+` AND atom = ? AND act = ? AND origin = ?`, j.args(identity.Atom, identity.Act, origin(identity.Origin))...).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -252,7 +252,7 @@ func (j *journal) Invocation(identity core.Identity) (*core.Ref, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ref core.Ref
+	var ref tardigrade.Ref
 	return &ref, json.Unmarshal(data, &ref)
 }
 
@@ -274,7 +274,7 @@ func (j *journal) Inputs() (map[string]json.RawMessage, error) {
 	return inputs, rows.Err()
 }
 
-func (j *journal) Checkpoint() (*core.Checkpoint, error) {
+func (j *journal) Checkpoint() (*tardigrade.Checkpoint, error) {
 	var data []byte
 	err := j.db.QueryRow(`SELECT checkpoint FROM checkpoints`+where, j.args()...).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -283,11 +283,11 @@ func (j *journal) Checkpoint() (*core.Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	var checkpoint core.Checkpoint
+	var checkpoint tardigrade.Checkpoint
 	return &checkpoint, json.Unmarshal(data, &checkpoint)
 }
 
-func (j *journal) SaveCheckpoint(checkpoint core.Checkpoint) error {
+func (j *journal) SaveCheckpoint(checkpoint tardigrade.Checkpoint) error {
 	data, err := json.Marshal(checkpoint)
 	if err != nil {
 		return err

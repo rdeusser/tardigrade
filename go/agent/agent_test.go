@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/rdeusser/tardigrade/go/agent"
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/library"
 	"github.com/rdeusser/tardigrade/go/model"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 type scripted struct {
@@ -27,7 +27,7 @@ func (s *scripted) Generate(ctx context.Context, r model.Request, onDelta func(m
 	s.mu.Unlock()
 	reply, err := s.reply(n, r)
 	if onDelta != nil && reply.Text != "" {
-		onDelta(model.Delta{Type: "text", Text: reply.Text})
+		onDelta(model.Delta{Type: model.DeltaText, Text: reply.Text})
 	}
 	return reply, err
 }
@@ -48,7 +48,7 @@ func toolCall(name, input string) model.Reply {
 
 type harness struct {
 	t     *testing.T
-	rt    *core.Runtime
+	rt    *tardigrade.Runtime
 	model *scripted
 }
 
@@ -63,7 +63,7 @@ func run(t *testing.T, o agent.Options, s agent.Services, reply func(n int, r mo
 	if o.ContextWindowTokens == 0 {
 		o.ContextWindowTokens = 100_000
 	}
-	rt, err := core.Open(core.Options{Actor: agent.New(o), Journal: core.NewMemoryJournal(), Acts: agent.Acts(s)})
+	rt, err := tardigrade.Open(tardigrade.Options{Actor: agent.New(o), Journal: tardigrade.NewMemoryJournal(), Handlers: agent.Handlers(s)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,12 +74,12 @@ func run(t *testing.T, o agent.Options, s agent.Services, reply func(n int, r mo
 func (h *harness) say(id, text string) {
 	h.t.Helper()
 	input, _ := json.Marshal(agent.MessageInput{Text: text})
-	if err := h.rt.Invoke("message", id, core.Sender{Kind: "external", ID: "test"}, input); err != nil {
+	if err := h.rt.Invoke("message", id, tardigrade.Sender{Kind: "external", ID: "test"}, input); err != nil {
 		h.t.Fatal(err)
 	}
 }
 
-func (h *harness) await(id string) core.MethodState {
+func (h *harness) await(id string) tardigrade.MethodState {
 	h.t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
@@ -88,7 +88,7 @@ func (h *harness) await(id string) core.MethodState {
 		if err != nil {
 			h.t.Fatal(err)
 		}
-		if state.Status != core.StatusPending {
+		if state.Status != tardigrade.StatusPending {
 			return state
 		}
 		if problems := h.rt.Status().Problems; len(problems) > 0 {
@@ -112,10 +112,10 @@ func (h *harness) types() []string {
 	return names
 }
 
-func output(t *testing.T, state core.MethodState) string {
+func output(t *testing.T, state tardigrade.MethodState) string {
 	t.Helper()
 	var out agent.MessageOutput
-	if state.Status != core.StatusCompleted || json.Unmarshal(state.Output, &out) != nil {
+	if state.Status != tardigrade.StatusCompleted || json.Unmarshal(state.Output, &out) != nil {
 		t.Fatalf("state = %+v", state)
 	}
 	return out.Text
@@ -146,7 +146,7 @@ func TestToolResultReturnsToModel(t *testing.T) {
 		t.Fatalf("reply = %q", got)
 	}
 	second := h.model.calls()[1].Messages
-	if len(second) != 3 || second[2].Role != "tool" || second[2].ToolCallID != "p1" || !strings.Contains(second[2].Text, `"chars":1`) {
+	if len(second) != 3 || second[2].Role != model.RoleTool || second[2].ToolCallID != "p1" || !strings.Contains(second[2].Text, `"chars":1`) {
 		t.Fatalf("second request messages = %+v", second)
 	}
 }
@@ -155,7 +155,7 @@ func TestPermissionDenialReachesModel(t *testing.T) {
 	notes := library.Notes(0)
 	policy := agent.PermissionPolicy{Default: agent.Ask, Actions: map[string]agent.PermissionRule{}}
 	h := run(t, agent.Options{Tools: library.Specs(notes), Permissions: &policy}, agent.Services{Tools: library.NewRegistry(notes),
-		Permission: func(_ *core.Execution, r agent.PermissionRequest) (agent.Decision, error) {
+		Permission: func(_ *tardigrade.Execution, r agent.PermissionRequest) (agent.Decision, error) {
 			return agent.Decision{Allowed: false, Reason: "not " + r.Resource}, nil
 		}}, func(n int, r model.Request) (model.Reply, error) {
 		if n == 0 {
@@ -221,10 +221,10 @@ func TestCancellationStopsTurn(t *testing.T) {
 	})
 	h.say("m1", "slow")
 	<-started
-	if err := h.rt.CancelCall("message", "m1", "user stopped", core.Sender{Kind: "external", ID: "test"}); err != nil {
+	if err := h.rt.CancelCall("message", "m1", "user stopped", tardigrade.Sender{Kind: "external", ID: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if state := h.await("m1"); state.Status != core.StatusCancelled || state.Reason != "user stopped" {
+	if state := h.await("m1"); state.Status != tardigrade.StatusCancelled || state.Reason != "user stopped" {
 		t.Fatalf("state = %+v; journal %v", state, h.types())
 	}
 }

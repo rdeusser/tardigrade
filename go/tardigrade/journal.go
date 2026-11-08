@@ -1,9 +1,10 @@
-package core
+package tardigrade
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 )
@@ -186,9 +187,7 @@ func (j *MemoryJournal) Append(expected int64, records []Record, changes Changes
 		}
 	}
 	j.records = append(j.records, records...)
-	for key, input := range changes.PutInputs {
-		j.inputs[key] = input
-	}
+	maps.Copy(j.inputs, changes.PutInputs)
 	for _, key := range changes.RemoveInputs {
 		delete(j.inputs, key)
 	}
@@ -219,11 +218,7 @@ func (j *MemoryJournal) Invocation(identity Identity) (*Ref, error) {
 func (j *MemoryJournal) Inputs() (map[string]json.RawMessage, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	copied := make(map[string]json.RawMessage, len(j.inputs))
-	for k, v := range j.inputs {
-		copied[k] = v
-	}
-	return copied, nil
+	return maps.Clone(j.inputs), nil
 }
 
 func (j *MemoryJournal) Checkpoint() (*Checkpoint, error) {

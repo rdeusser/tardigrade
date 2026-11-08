@@ -17,7 +17,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/rdeusser/tardigrade/go/core"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 	"github.com/rdeusser/tardigrade/go/host"
 	"github.com/rdeusser/tardigrade/go/reactive"
 	"github.com/rdeusser/tardigrade/go/sqlite"
@@ -35,34 +35,34 @@ type Count struct {
 	At int64 ` + "`json:\"at\"`" + `
 }
 
-var count = core.DurableAtom("count", Count{},
-	core.On(func(c Count, _ Incremented, m core.Meta) Count { return Count{N: c.N + 1, At: m.Position} }),
-	core.On(func(c Count, _ Decremented, m core.Meta) Count { return Count{N: c.N - 1, At: m.Position} }),
+var count = tardigrade.DurableAtom("count", Count{},
+	tardigrade.On(func(c Count, _ Incremented, m tardigrade.Meta) Count { return Count{N: c.N + 1, At: m.Position} }),
+	tardigrade.On(func(c Count, _ Decremented, m tardigrade.Meta) Count { return Count{N: c.N - 1, At: m.Position} }),
 )
 
-// Notify is durable work whose implementation the host supplies.
-var Notify = core.NewAct[int, struct{}]("notify")
+// Notify is durable work; the host supplies the handler that runs it.
+var Notify = tardigrade.NewAct[int, struct{}]("notify")
 
 // notify is an effect atom: it derives a view and proposes acts from state.
-var notify = core.EffectAtom(func(g reactive.Getter) core.Output[int] {
-	c := core.Get(g, count)
-	out := core.Output[int]{View: c.N}
+var notify = tardigrade.EffectAtom(func(g reactive.Getter) tardigrade.Output[int] {
+	c := tardigrade.Get(g, count)
+	out := tardigrade.Output[int]{View: c.N}
 	if c.N > 0 && c.N%2 == 0 {
-		out.Acts = map[string]core.Proposal{"notify": Notify.Request(core.Request[int, struct{}]{Origin: core.At(c.At), Input: c.N})}
+		out.Acts = map[string]tardigrade.Proposal{"notify": Notify.Request(tardigrade.Request[int, struct{}]{Origin: new(c.At), Input: c.N})}
 	}
 	return out
 })
 
-func method(event core.Event) core.Method {
-	return core.NewMethod(core.MethodSpec[struct{}, int]{
-		OnReceive: func(struct{}, core.MethodContext) core.Event { return event },
-		Result: func(_ struct{}, g reactive.Getter, _ core.MethodContext) *core.MethodResult[int] {
-			return core.Completed(core.Get(g, count).N)
+func method(event tardigrade.Event) tardigrade.Method {
+	return tardigrade.NewMethod(tardigrade.MethodSpec[struct{}, int]{
+		OnReceive: func(struct{}, tardigrade.MethodContext) tardigrade.Event { return event },
+		Result: func(_ struct{}, g reactive.Getter, _ tardigrade.MethodContext) *tardigrade.MethodResult[int] {
+			return tardigrade.Completed(tardigrade.Get(g, count).N)
 		},
 	})
 }
 
-var counter = core.DefineActor("counter", notify, map[string]core.Method{
+var counter = tardigrade.DefineActor("counter", notify, map[string]tardigrade.Method{
 	"increment": method(Incremented{}),
 	"decrement": method(Decremented{}),
 })
@@ -73,12 +73,12 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
-	notifyImpl := Notify.Implement(func(_ *core.Execution, n int) (core.Result[struct{}], error) {
+	notifyImpl := Notify.Handle(func(_ *tardigrade.Execution, n int) (tardigrade.Result[struct{}], error) {
 		log.Printf("%d is even", n)
-		return core.Value(struct{}{}), nil
+		return tardigrade.Value(struct{}{}), nil
 	}, nil)
-	h, err := host.New(host.Options{Actor: counter, Store: store, Acts: func(*host.Host, core.ThreadCoordinate) []core.Implementation {
-		return []core.Implementation{notifyImpl}
+	h, err := host.New(host.Options{Actor: counter, Store: store, Handlers: func(*host.Host, tardigrade.ThreadCoordinate) []tardigrade.Handler {
+		return []tardigrade.Handler{notifyImpl}
 	}})
 	if err != nil {
 		log.Fatal(err)
@@ -102,7 +102,7 @@ import (
 	"path/filepath"
 
 	"github.com/rdeusser/tardigrade/go/agent"
-	"github.com/rdeusser/tardigrade/go/core"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 	"github.com/rdeusser/tardigrade/go/host"
 	"github.com/rdeusser/tardigrade/go/library"
 	"github.com/rdeusser/tardigrade/go/model"
@@ -127,9 +127,9 @@ func main() {
 		Tools:               library.Specs(library.Filesystem(nil)),
 	})
 	router := &model.Router{Config: config}
-	h, err := host.New(host.Options{Actor: meeseeks, Store: store, Acts: func(_ *host.Host, t core.ThreadCoordinate) []core.Implementation {
+	h, err := host.New(host.Options{Actor: meeseeks, Store: store, Handlers: func(_ *host.Host, t tardigrade.ThreadCoordinate) []tardigrade.Handler {
 		workspace := library.LocalWorkspace{Dir: filepath.Join(".tardigrade/workspace", t.Instance, t.Thread)}
-		return agent.Acts(agent.Services{Model: router, Tools: library.NewRegistry(library.Filesystem(workspace))})
+		return agent.Handlers(agent.Services{Model: router, Tools: library.NewRegistry(library.Filesystem(workspace))})
 	}})
 	if err != nil {
 		log.Fatal(err)
@@ -170,7 +170,7 @@ func initProject(flags *flag.FlagSet, args []string, out io.Writer) error {
 		return err
 	}
 	module := filepath.Base(dir)
-	gomod := fmt.Sprintf("module %s\n\ngo 1.24\n", module)
+	gomod := fmt.Sprintf("module %s\n\ngo 1.27\n", module)
 	if *replace != "" {
 		absolute, err := filepath.Abs(*replace)
 		if err != nil {

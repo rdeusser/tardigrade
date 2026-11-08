@@ -1,4 +1,4 @@
-package core
+package tardigrade
 
 import (
 	"encoding/json"
@@ -38,22 +38,22 @@ func (v *logView) records(from, to int64) []Record {
 // logAtom holds the runtime's current journal view; it is nil outside a runtime.
 var logAtom = reactive.Value[*logView](nil)
 
-// Handler folds one event type into a durable atom's state.
-type Handler[S any] struct {
+// Reducer folds one event type into a durable atom's state.
+type Reducer[S any] struct {
 	event  string
 	reduce func(S, Event, Meta) S
 }
 
-// On returns a handler for events of type E and registers E for journal decoding.
-func On[S any, E Event](reduce func(state S, event E, meta Meta) S) Handler[S] {
-	return Handler[S]{event: RegisterEvent[E](), reduce: func(s S, e Event, m Meta) S { return reduce(s, e.(E), m) }}
+// On returns a reducer for events of type E and registers E for journal decoding.
+func On[S any, E Event](reduce func(state S, event E, meta Meta) S) Reducer[S] {
+	return Reducer[S]{event: RegisterEvent[E](), reduce: func(s S, e Event, m Meta) S { return reduce(s, e.(E), m) }}
 }
 
 type durableSpec[S any] struct {
 	name     string
 	initial  S
 	from     int64
-	handlers map[string][]func(S, Event, Meta) S
+	reducers map[string][]func(S, Event, Meta) S
 }
 
 type durableFrame[S any] struct {
@@ -72,13 +72,13 @@ func (f *durableFrame[S]) checkpoint() (string, *journalSource, AtomState, error
 	return f.name, f.source, AtomState{Position: f.position, State: state}, err
 }
 
-func newSpec[S any](name string, initial S, from int64, handlers []Handler[S]) *durableSpec[S] {
+func newSpec[S any](name string, initial S, from int64, reducers []Reducer[S]) *durableSpec[S] {
 	if name == "" {
-		panic(fmt.Errorf("core: durable atom name must not be empty"))
+		panic(fmt.Errorf("tardigrade: durable atom name must not be empty"))
 	}
-	spec := &durableSpec[S]{name: name, initial: initial, from: from, handlers: map[string][]func(S, Event, Meta) S{}}
-	for _, h := range handlers {
-		spec.handlers[h.event] = append(spec.handlers[h.event], h.reduce)
+	spec := &durableSpec[S]{name: name, initial: initial, from: from, reducers: map[string][]func(S, Event, Meta) S{}}
+	for _, r := range reducers {
+		spec.reducers[r.event] = append(spec.reducers[r.event], r.reduce)
 	}
 	return spec
 }
@@ -100,7 +100,7 @@ func (spec *durableSpec[S]) fold(g reactive.Getter) *durableFrame[S] {
 	}
 	if from < view.length {
 		for i, record := range view.records(from, view.length) {
-			for _, reduce := range spec.handlers[record.Event.EventType()] {
+			for _, reduce := range spec.reducers[record.Event.EventType()] {
 				state = reduce(state, record.Event, Meta{Position: from + int64(i), RecordedAt: record.RecordedAt, Message: record.Message})
 			}
 		}
@@ -108,17 +108,17 @@ func (spec *durableSpec[S]) fold(g reactive.Getter) *durableFrame[S] {
 	return &durableFrame[S]{name: spec.name, source: view.source, position: max(view.length, from), state: state}
 }
 
-// DurableAtom folds journal events into state with its handlers. Names identify checkpointed state and must be unique within an actor. Reducers must return new values instead of mutating their input.
-func DurableAtom[S any](name string, initial S, handlers ...Handler[S]) reactive.Atom[S] {
-	spec := newSpec(name, initial, 0, handlers)
+// DurableAtom folds journal events into state with its reducers. Names identify checkpointed state and must be unique within an actor. Reducers must return new values instead of mutating their input.
+func DurableAtom[S any](name string, initial S, reducers ...Reducer[S]) reactive.Atom[S] {
+	spec := newSpec(name, initial, 0, reducers)
 	frame := reactive.New(spec.fold)
 	return reactive.New(func(g reactive.Getter) S { return reactive.Get(g, frame).state })
 }
 
 // DurableFamily defines durable atoms per key. Each member folds from the position from returns, so a member created late reads only the journal suffix that can affect it.
-func DurableFamily[K comparable, S any](name func(K) string, initial S, from func(K) int64, handlers func(K) []Handler[S]) func(K) reactive.Atom[S] {
+func DurableFamily[K comparable, S any](name func(K) string, initial S, from func(K) int64, reducers func(K) []Reducer[S]) func(K) reactive.Atom[S] {
 	specs := reactive.Family(func(key K, _ reactive.Getter) *durableSpec[S] {
-		return newSpec(name(key), initial, from(key), handlers(key))
+		return newSpec(name(key), initial, from(key), reducers(key))
 	})
 	frames := reactive.Family(func(key K, g reactive.Getter) *durableFrame[S] {
 		return reactive.Get(g, specs(key)).fold(g)
@@ -131,46 +131,36 @@ func Atom[T any](read func(g reactive.Getter) T) reactive.Atom[T] {
 	return reactive.New(read)
 }
 
-// Get reads an atom inside an atom definition, method result, or act implementation.
+// Get reads an atom inside an atom definition, method result, or act handler.
 func Get[T any](g reactive.Getter, a reactive.Atom[T]) T {
 	return reactive.Get(g, a)
 }
 
-// PromiseStatus is the settlement state of deferred work.
-type PromiseStatus struct {
-	Status string          `json:"status"`
-	Value  json.RawMessage `json:"value,omitempty"`
-	Reason *Reason         `json:"reason,omitempty"`
+// PromiseState is whether deferred work finished and how: Value on success, Err on failure.
+type PromiseState struct {
+	Finished bool            `json:"finished"`
+	Value    json.RawMessage `json:"value,omitempty"`
+	Err      *Failure        `json:"error,omitempty"`
 }
 
-// Promise status values.
-const (
-	PromisePending   = "pending"
-	PromiseFulfilled = "fulfilled"
-	PromiseRejected  = "rejected"
-)
-
-// PromiseOf returns the durable settlement state of the work a ref identifies; cancellation of pending work rejects it.
+// PromiseOf returns the durable state of the deferred work a ref identifies; cancelling unfinished work finishes it with a FailureCancelled error.
 var PromiseOf = DurableFamily(
 	func(ref Ref) string { return "promise:" + ref.Key() },
-	PromiseStatus{Status: PromisePending},
+	PromiseState{},
 	func(ref Ref) int64 { return ref.Seq },
-	func(ref Ref) []Handler[PromiseStatus] {
-		return []Handler[PromiseStatus]{
-			On(func(s PromiseStatus, e PromiseSettled, _ Meta) PromiseStatus {
-				if e.Ref != ref || s.Status != PromisePending {
+	func(ref Ref) []Reducer[PromiseState] {
+		return []Reducer[PromiseState]{
+			On(func(s PromiseState, e PromiseFinished, _ Meta) PromiseState {
+				if e.Ref != ref || s.Finished {
 					return s
 				}
-				if e.Reason != nil {
-					return PromiseStatus{Status: PromiseRejected, Reason: e.Reason}
-				}
-				return PromiseStatus{Status: PromiseFulfilled, Value: e.Value}
+				return PromiseState{Finished: true, Value: e.Value, Err: e.Err}
 			}),
-			On(func(s PromiseStatus, e EffectCancelled, _ Meta) PromiseStatus {
-				if e.Ref != ref || s.Status != PromisePending {
+			On(func(s PromiseState, e EffectCancelled, _ Meta) PromiseState {
+				if e.Ref != ref || s.Finished {
 					return s
 				}
-				return PromiseStatus{Status: PromiseRejected, Reason: &Reason{Kind: ReasonCancelled, Message: e.Reason}}
+				return PromiseState{Finished: true, Err: &Failure{Kind: FailureCancelled, Message: e.Reason}}
 			}),
 		}
 	},

@@ -3,16 +3,17 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/library"
 	"github.com/rdeusser/tardigrade/go/model"
 	"github.com/rdeusser/tardigrade/go/reactive"
 	"github.com/rdeusser/tardigrade/go/schema"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 // ModelInput is the request of a model act.
@@ -23,7 +24,7 @@ type ModelInput struct {
 	Context []model.Message `json:"context"`
 }
 
-// ExecuteInput is the request of the tool act. Value or Error, when set, settles the call without running the tool.
+// ExecuteInput is the request of the tool act. Value or Error, when set, finishes the call without running the tool.
 type ExecuteInput struct {
 	Call    ToolCall        `json:"call"`
 	Counted bool            `json:"counted"`
@@ -52,44 +53,27 @@ type BudgetRequest struct {
 
 // Acts the agent proposes.
 var (
-	Generate  = core.NewAct[ModelInput, model.Reply]("agent.model.generate")
-	Summarize = core.NewAct[ModelInput, model.Reply]("agent.model.summarize")
-	// ExecuteTool returns encoded library.Content immediately; a background tool's promise settles with arbitrary JSON that reaches the agent through core.PromiseOf.
-	ExecuteTool   = core.NewAct[ExecuteInput, json.RawMessage]("agent.tool.execute")
-	AskPermission = core.NewAct[PermissionRequest, Decision]("agent.permission.request")
-	AskBudget     = core.NewAct[BudgetRequest, BudgetDecision]("agent.budget.request")
+	Generate  = tardigrade.NewAct[ModelInput, model.Reply]("agent.model.generate")
+	Summarize = tardigrade.NewAct[ModelInput, model.Reply]("agent.model.summarize")
+	// ExecuteTool returns encoded library.Content immediately; a background tool's promise finishes with arbitrary JSON that reaches the agent through tardigrade.PromiseOf.
+	ExecuteTool   = tardigrade.NewAct[ExecuteInput, json.RawMessage]("agent.tool.execute")
+	AskPermission = tardigrade.NewAct[PermissionRequest, Decision]("agent.permission.request")
+	AskBudget     = tardigrade.NewAct[BudgetRequest, BudgetDecision]("agent.budget.request")
 )
 
 // ToolsMetric is the budget metric counting tool calls.
 const ToolsMetric = "toolCalls"
 
-func merge[V any](dst map[string]V, src map[string]V) map[string]V {
-	if dst == nil {
-		dst = map[string]V{}
-	}
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}
-
-func message(reason *core.Reason) string {
-	if reason == nil {
-		return ""
-	}
-	return reason.Message
-}
-
-func permissionsAtom(initial PermissionPolicy, specs map[string]library.Spec) reactive.Atom[core.Output[Permissions]] {
-	return core.EffectAtom(func(g reactive.Getter) core.Output[Permissions] {
-		state := core.Get(g, PermissionState)
+func permissionsAtom(initial PermissionPolicy, specs map[string]library.Spec) reactive.Atom[tardigrade.Output[Permissions]] {
+	return tardigrade.EffectAtom(func(g reactive.Getter) tardigrade.Output[Permissions] {
+		state := tardigrade.Get(g, PermissionState)
 		if state.Policy == nil {
-			return core.Output[Permissions]{View: state, Events: map[string]core.Event{"permission": PermissionConfigured{Policy: initial}}}
+			return tardigrade.Output[Permissions]{View: state, Events: map[string]tardigrade.Event{"permission": PermissionConfigured{Policy: initial}}}
 		}
-		tools := core.Get(g, PendingTools)
+		tools := tardigrade.Get(g, PendingTools)
 		call := tools.Pending
 		if call == nil || state.Decided("tool.execute", call.CallID) != nil {
-			return core.Output[Permissions]{View: state}
+			return tardigrade.Output[Permissions]{View: state}
 		}
 		var readOnly *bool
 		if spec, ok := specs[call.Name]; ok && spec.Annotations != nil {
@@ -106,17 +90,17 @@ func permissionsAtom(initial PermissionPolicy, specs map[string]library.Spec) re
 			}
 		}
 		if mode != Ask {
-			return core.Output[Permissions]{View: state, Events: map[string]core.Event{"permission": PermissionResolved{Action: "tool.execute", RequestID: call.CallID, Decision: Decision{Allowed: mode == Allow, Reason: "Permission policy: " + mode}}}}
+			return tardigrade.Output[Permissions]{View: state, Events: map[string]tardigrade.Event{"permission": PermissionResolved{Action: "tool.execute", RequestID: call.CallID, Decision: Decision{Allowed: mode == Allow, Reason: "Permission policy: " + string(mode)}}}}
 		}
 		requestID := call.CallID
-		return core.Output[Permissions]{View: state, Acts: map[string]core.Proposal{"permission": AskPermission.Request(core.Request[PermissionRequest, Decision]{
+		return tardigrade.Output[Permissions]{View: state, Acts: map[string]tardigrade.Proposal{"permission": AskPermission.Request(tardigrade.Request[PermissionRequest, Decision]{
 			Origin: tools.Origin, Input: PermissionRequest{Action: "tool.execute", RequestID: requestID, Resource: call.Name, Input: call.Input, ReadOnly: readOnly},
-			OnSettled: func(o core.Outcome[Decision], _ core.Ref) []core.Event {
+			OnFinished: func(o tardigrade.Outcome[Decision], _ tardigrade.Ref) []tardigrade.Event {
 				decision := o.Value
-				if o.Reason != nil {
-					decision = Decision{Allowed: false, Reason: "Permission request failed: " + o.Reason.Message}
+				if o.Err != nil {
+					decision = Decision{Allowed: false, Reason: "Permission request failed: " + o.Err.Message}
 				}
-				return []core.Event{PermissionResolved{Action: "tool.execute", RequestID: requestID, Decision: decision}}
+				return []tardigrade.Event{PermissionResolved{Action: "tool.execute", RequestID: requestID, Decision: decision}}
 			},
 		})}}
 	})
@@ -148,19 +132,19 @@ func (b budgetAsk) Validate() error {
 	return nil
 }
 
-func budgetAtom(initial BudgetPolicy) reactive.Atom[core.Output[BudgetView]] {
-	return core.EffectAtom(func(g reactive.Getter) core.Output[BudgetView] {
-		budgets := core.Get(g, BudgetState)
+func budgetAtom(initial BudgetPolicy) reactive.Atom[tardigrade.Output[BudgetView]] {
+	return tardigrade.EffectAtom(func(g reactive.Getter) tardigrade.Output[BudgetView] {
+		budgets := tardigrade.Get(g, BudgetState)
 		i := budgetIndex(budgets, ToolsMetric)
 		if i < 0 {
-			return core.Output[BudgetView]{Events: map[string]core.Event{"budget": BudgetConfigured{Metric: ToolsMetric, Policy: initial}}}
+			return tardigrade.Output[BudgetView]{Events: map[string]tardigrade.Event{"budget": BudgetConfigured{Metric: ToolsMetric, Policy: initial}}}
 		}
 		state := budgets[i]
-		used := core.Get(g, SpendState).SpendOf(state.TurnID).ToolCalls
+		used := tardigrade.Get(g, SpendState).SpendOf(state.TurnID).ToolCalls
 		limit := state.Policy.Limit + state.Granted
 		view := BudgetView{Configured: true, RequestTool: state.Policy.RequestTool, Used: used, Limit: limit, Remaining: max(0, limit-used)}
-		view.Exhausted = view.Remaining == 0 && state.Policy.OnExhausted == "deny"
-		tools := core.Get(g, PendingTools)
+		view.Exhausted = view.Remaining == 0 && state.Policy.OnExhausted == ExhaustedDeny
+		tools := tardigrade.Get(g, PendingTools)
 		pending := tools.Pending
 		var resolution *BudgetDecision
 		if pending != nil {
@@ -169,27 +153,27 @@ func budgetAtom(initial BudgetPolicy) reactive.Atom[core.Output[BudgetView]] {
 		if pending != nil && pending.Name == state.Policy.RequestTool && state.Policy.RequestTool != "" {
 			if resolution != nil {
 				view.Response = resolution
-				return core.Output[BudgetView]{View: view}
+				return tardigrade.Output[BudgetView]{View: view}
 			}
 			if view.Remaining > 0 {
 				view.ResponseErr = "Tool budget is not exhausted"
-				return core.Output[BudgetView]{View: view}
+				return tardigrade.Output[BudgetView]{View: view}
 			}
 			ask, err := schema.Decode[budgetAsk](pending.Input)
 			if err != nil {
 				view.ResponseErr = err.Error()
-				return core.Output[BudgetView]{View: view}
+				return tardigrade.Output[BudgetView]{View: view}
 			}
 			callID := pending.CallID
 			view.Blocked = "Waiting for budget decision"
-			return core.Output[BudgetView]{View: view, Acts: map[string]core.Proposal{"budget": AskBudget.Request(core.Request[BudgetRequest, BudgetDecision]{
+			return tardigrade.Output[BudgetView]{View: view, Acts: map[string]tardigrade.Proposal{"budget": AskBudget.Request(tardigrade.Request[BudgetRequest, BudgetDecision]{
 				Origin: tools.Origin, Input: BudgetRequest{Metric: ToolsMetric, CallID: callID, Amount: ask.Amount, Reason: ask.Reason, Used: used, Limit: limit},
-				OnSettled: func(o core.Outcome[BudgetDecision], _ core.Ref) []core.Event {
+				OnFinished: func(o tardigrade.Outcome[BudgetDecision], _ tardigrade.Ref) []tardigrade.Event {
 					decision := o.Value
-					if o.Reason != nil {
-						decision = BudgetDecision{Allowed: false, Reason: "Budget request failed: " + o.Reason.Message}
+					if o.Err != nil {
+						decision = BudgetDecision{Allowed: false, Reason: "Budget request failed: " + o.Err.Message}
 					}
-					return []core.Event{BudgetResolved{Metric: ToolsMetric, CallID: callID, Decision: decision}}
+					return []tardigrade.Event{BudgetResolved{Metric: ToolsMetric, CallID: callID, Decision: decision}}
 				},
 			})}}
 		}
@@ -203,7 +187,7 @@ func budgetAtom(initial BudgetPolicy) reactive.Atom[core.Output[BudgetView]] {
 		default:
 			view.Blocked = fmt.Sprintf("Tool budget exhausted: %d/%d calls", used, limit)
 		}
-		return core.Output[BudgetView]{View: view}
+		return tardigrade.Output[BudgetView]{View: view}
 	})
 }
 
@@ -239,28 +223,30 @@ type plan struct {
 	err     string
 }
 
-func toolsAtom(specs []library.Spec, permissions reactive.Atom[core.Output[Permissions]], budget reactive.Atom[core.Output[BudgetView]], promises reactive.Atom[map[string]core.Event]) reactive.Atom[core.Output[ToolsView]] {
+func toolsAtom(specs []library.Spec, permissions reactive.Atom[tardigrade.Output[Permissions]], budget reactive.Atom[tardigrade.Output[BudgetView]], promises reactive.Atom[map[string]tardigrade.Event]) reactive.Atom[tardigrade.Output[ToolsView]] {
 	known := map[string]bool{}
 	for _, s := range specs {
 		known[s.Name] = true
 	}
-	return core.EffectAtom(func(g reactive.Getter) core.Output[ToolsView] {
-		tools := core.Get(g, PendingTools)
-		out := core.Output[ToolsView]{View: ToolsView{Specs: specs}, Events: merge(nil, core.Get(g, promises)), Acts: map[string]core.Proposal{}}
+	return tardigrade.EffectAtom(func(g reactive.Getter) tardigrade.Output[ToolsView] {
+		tools := tardigrade.Get(g, PendingTools)
+		out := tardigrade.Output[ToolsView]{View: ToolsView{Specs: specs}, Events: maps.Clone(tardigrade.Get(g, promises)), Acts: map[string]tardigrade.Proposal{}}
 		var decided func(callID string) *Decision
 		if permissions != nil {
-			p := core.Get(g, permissions)
-			out.Events, out.Acts = merge(out.Events, p.Events), merge(out.Acts, p.Acts)
+			p := tardigrade.Get(g, permissions)
+			maps.Copy(out.Events, p.Events)
+			maps.Copy(out.Acts, p.Acts)
 			decided = func(callID string) *Decision { return p.View.Decided("tool.execute", callID) }
 		}
 		var allowance BudgetView
-		var budgetOut core.Output[BudgetView]
+		var budgetOut tardigrade.Output[BudgetView]
 		if budget != nil {
-			budgetOut = core.Get(g, budget)
+			budgetOut = tardigrade.Get(g, budget)
 			allowance = budgetOut.View
 			out.View.Instructions = budgetInstructions(allowance)
 			if !allowance.Configured {
-				out.Events, out.Acts = merge(out.Events, budgetOut.Events), merge(out.Acts, budgetOut.Acts)
+				maps.Copy(out.Events, budgetOut.Events)
+				maps.Copy(out.Acts, budgetOut.Acts)
 			} else if allowance.Exhausted {
 				out.View.Specs = nil
 			} else if allowance.RequestTool != "" && allowance.Remaining == 0 {
@@ -310,7 +296,8 @@ func toolsAtom(specs []library.Spec, permissions reactive.Atom[core.Output[Permi
 		}
 		p := prepare(*call)
 		if allowance.Configured && p.ready && p.counted || (call.Name == allowance.RequestTool && allowance.Configured) {
-			out.Events, out.Acts = merge(out.Events, budgetOut.Events), merge(out.Acts, budgetOut.Acts)
+			maps.Copy(out.Events, budgetOut.Events)
+			maps.Copy(out.Acts, budgetOut.Acts)
 		}
 		if !p.ready {
 			return out
@@ -318,47 +305,47 @@ func toolsAtom(specs []library.Spec, permissions reactive.Atom[core.Output[Permi
 		current := *call
 		owner := &ToolOwner{Name: current.Name, ProviderID: current.ProviderID}
 		turnID := tools.TurnID
-		out.Acts["execution"] = ExecuteTool.Request(core.Request[ExecuteInput, json.RawMessage]{
+		out.Acts["execution"] = ExecuteTool.Request(tardigrade.Request[ExecuteInput, json.RawMessage]{
 			Origin: tools.Origin, Input: ExecuteInput{Call: current, Counted: p.counted, Value: p.value, Error: p.err},
-			OnRequested: func(core.Ref) []core.Event {
-				return []core.Event{ToolCalled{CallID: current.CallID, Counted: p.counted}}
+			OnRequested: func(tardigrade.Ref) []tardigrade.Event {
+				return []tardigrade.Event{ToolCalled{CallID: current.CallID, Counted: p.counted}}
 			},
-			OnDeferred: func(handle core.Handle, ref core.Ref) []core.Event {
+			OnDeferred: func(handle tardigrade.Handle, ref tardigrade.Ref) []tardigrade.Event {
 				promise := library.Promise{Ref: ref, Handle: handle}
 				text, _ := json.Marshal(map[string]any{"type": "promise", "ref": ref, "handle": handle})
-				return []core.Event{ToolReturned{CallID: current.CallID, TurnID: turnID, Tool: owner, Content: []model.Part{{Type: "text", Text: string(text)}}, Promise: &promise}}
+				return []tardigrade.Event{ToolReturned{CallID: current.CallID, TurnID: turnID, Tool: owner, Content: []model.Part{{Type: model.PartText, Text: string(text)}}, Promise: &promise}}
 			},
-			OnSettled: func(o core.Outcome[json.RawMessage], _ core.Ref) []core.Event {
+			OnFinished: func(o tardigrade.Outcome[json.RawMessage], _ tardigrade.Ref) []tardigrade.Event {
 				if o.Handle != nil {
 					return nil
 				}
-				if o.Reason != nil {
-					return []core.Event{ToolReturned{CallID: current.CallID, TurnID: turnID, Tool: owner, Content: []model.Part{}, Error: ptr(o.Reason.Message)}}
+				if o.Err != nil {
+					return []tardigrade.Event{ToolReturned{CallID: current.CallID, TurnID: turnID, Tool: owner, Content: []model.Part{}, Error: new(o.Err.Message)}}
 				}
 				var content []model.Part
 				if err := json.Unmarshal(o.Value, &content); err != nil {
-					content = []model.Part{{Type: "text", Text: string(o.Value)}}
+					content = []model.Part{{Type: model.PartText, Text: string(o.Value)}}
 				}
-				return []core.Event{ToolReturned{CallID: current.CallID, TurnID: turnID, Tool: owner, Content: content}}
+				return []tardigrade.Event{ToolReturned{CallID: current.CallID, TurnID: turnID, Tool: owner, Content: content}}
 			},
 		})
 		return out
 	})
 }
 
-// promisesAtom turns settled background tool results into turns.
-var promisesAtom = core.Atom(func(g reactive.Getter) map[string]core.Event {
-	events := map[string]core.Event{}
-	for _, item := range core.Get(g, Submissions) {
-		status := core.Get(g, core.PromiseOf(item.Promise.Ref))
-		if status.Status == core.PromisePending {
+// promisesAtom turns finished background tool results into turns.
+var promisesAtom = tardigrade.Atom(func(g reactive.Getter) map[string]tardigrade.Event {
+	events := map[string]tardigrade.Event{}
+	for _, item := range tardigrade.Get(g, Submissions) {
+		state := tardigrade.Get(g, tardigrade.PromiseOf(item.Promise.Ref))
+		if !state.Finished {
 			continue
 		}
 		source := SourceTool
-		if item.Promise.Handle.Executor == "thread" {
+		if item.Promise.Handle.Executor == tardigrade.ExecutorThread {
 			source = SourceAgent
 		}
-		data, _ := json.Marshal(map[string]any{"callId": item.CallID, "handle": item.Promise.Handle, "result": status})
+		data, _ := json.Marshal(map[string]any{"callId": item.CallID, "handle": item.Promise.Handle, "result": state})
 		ref := item.Promise.Ref
 		events["promise:"+item.CallID] = TurnRequested{TurnID: "promise:" + item.CallID, Source: source, PromiseRef: &ref, Text: "Tool promise result (data): " + string(data)}
 	}
@@ -423,17 +410,9 @@ func (o CompactionOptions) resolved() CompactionOptions {
 	return o
 }
 
-// Context positions.
-const (
-	ContextConfiguring = "configuring"
-	ContextCompacting  = "compacting"
-	ContextFailed      = "failed"
-	ContextReady       = "ready"
-)
-
-// ContextView is the model context: Messages when Position is ready, Reason when failed.
+// ContextView is the model context: Messages when Phase is PhaseReady, Reason when PhaseFailed.
 type ContextView struct {
-	Position        string
+	Phase           Phase
 	Messages        []model.Message
 	Reason          string
 	EstimatedTokens int
@@ -449,23 +428,23 @@ func clip(text string, limit int) string {
 	return string(runes[:head]) + truncationMarker + string(runes[len(runes)-(retained-head):])
 }
 
-func compactAtom(options CompactionOptions) reactive.Atom[core.Output[ContextView]] {
+func compactAtom(options CompactionOptions) reactive.Atom[tardigrade.Output[ContextView]] {
 	o := options.resolved()
 	toolChars := int(float64(o.ToolOutputTokens) * o.CharsPerToken)
 	userChars := int(float64(o.UserMessageTokens) * o.CharsPerToken)
 	render := func(m model.Message) model.Message {
-		if m.Role == "assistant" {
+		if m.Role == model.RoleAssistant {
 			return m
 		}
 		limit := userChars
-		if m.Role == "tool" {
+		if m.Role == model.RoleTool {
 			limit = toolChars
 		}
 		m.Text = clip(m.Text, limit)
 		if len(m.Content) > 0 {
 			parts := slices.Clone(m.Content)
 			for i := range parts {
-				if parts[i].Type == "text" {
+				if parts[i].Type == model.PartText {
 					parts[i].Text = clip(parts[i].Text, limit)
 				}
 			}
@@ -477,35 +456,35 @@ func compactAtom(options CompactionOptions) reactive.Atom[core.Output[ContextVie
 		data, _ := json.Marshal(m)
 		images := 0
 		for _, p := range m.Content {
-			if p.Type == "file" && strings.HasPrefix(p.MediaType, "image/") {
+			if p.IsImage() {
 				images++
 			}
 		}
 		chars := len(data)
 		for _, p := range m.Content {
-			if p.Type == "file" {
+			if p.Type == model.PartFile {
 				chars -= (len(p.Data)*4 + 2) / 3
 			}
 		}
 		return chars + int(float64(images*o.ImageTokens)*o.CharsPerToken)
 	}
-	return core.EffectAtom(func(g reactive.Getter) core.Output[ContextView] {
-		configured := core.Get(g, ModelState)
+	return tardigrade.EffectAtom(func(g reactive.Getter) tardigrade.Output[ContextView] {
+		configured := tardigrade.Get(g, ModelState)
 		if configured == nil {
-			return core.Output[ContextView]{View: ContextView{Position: ContextConfiguring}}
+			return tardigrade.Output[ContextView]{View: ContextView{Phase: PhaseConfiguring}}
 		}
-		state := core.Get(g, CompactionState)
+		state := tardigrade.Get(g, CompactionState)
 		window := configured.ContextWindowTokens
 		trigger := int(math.Floor(float64(window) * o.TriggerRatio))
 		retain := int(math.Floor(float64(window) * o.RetainRatio))
 		tokens := func(chars int) int { return int(math.Ceil(float64(chars) / o.CharsPerToken)) }
 		if state.Failure != nil {
-			return core.Output[ContextView]{View: ContextView{Position: ContextFailed, Reason: *state.Failure}}
+			return tardigrade.Output[ContextView]{View: ContextView{Phase: PhaseFailed, Reason: *state.Failure}}
 		}
 		if state.Pending != nil {
-			return core.Output[ContextView]{View: ContextView{Position: ContextCompacting}}
+			return tardigrade.Output[ContextView]{View: ContextView{Phase: PhaseCompacting}}
 		}
-		entries := core.Get(g, Conversation)
+		entries := tardigrade.Get(g, Conversation)
 		if state.Through > len(entries) {
 			panic(fmt.Errorf("compaction covers %d messages of %d", state.Through, len(entries)))
 		}
@@ -516,7 +495,7 @@ func compactAtom(options CompactionOptions) reactive.Atom[core.Output[ContextVie
 		}
 		var summary []model.Message
 		if state.Summary != "" {
-			summary = []model.Message{render(model.Message{Role: "user", Text: summaryPrefix + state.Summary})}
+			summary = []model.Message{render(model.Message{Role: model.RoleUser, Text: summaryPrefix + state.Summary})}
 		}
 		messages := make([]model.Message, len(visible))
 		sizes := make([]int, len(visible))
@@ -540,20 +519,20 @@ func compactAtom(options CompactionOptions) reactive.Atom[core.Output[ContextVie
 				estimate = max(estimate, a.Tokens+tokens(after))
 			}
 		}
-		ready := ContextView{Position: ContextReady, Messages: append(summary, messages...), EstimatedTokens: estimate}
+		ready := ContextView{Phase: PhaseReady, Messages: append(summary, messages...), EstimatedTokens: estimate}
 		if !more && estimate < trigger {
-			return core.Output[ContextView]{View: ready}
+			return tardigrade.Output[ContextView]{View: ready}
 		}
 		var boundaries []int
 		pending := map[string]bool{}
 		for i, m := range messages {
-			if i > 0 && len(pending) == 0 && (m.Role == "user" || (m.Role == "assistant" && len(m.ToolCalls) > 0)) {
+			if i > 0 && len(pending) == 0 && (m.Role == model.RoleUser || (m.Role == model.RoleAssistant && len(m.ToolCalls) > 0)) {
 				boundaries = append(boundaries, i)
 			}
 			for _, c := range m.ToolCalls {
 				pending[c.ID] = true
 			}
-			if m.Role == "tool" {
+			if m.Role == model.RoleTool {
 				delete(pending, m.ToolCallID)
 			}
 		}
@@ -562,9 +541,9 @@ func compactAtom(options CompactionOptions) reactive.Atom[core.Output[ContextVie
 		}
 		if len(boundaries) == 0 {
 			if more {
-				return core.Output[ContextView]{View: ContextView{Position: ContextFailed, Reason: "compaction window cannot fit a complete message or tool exchange; increase MaxContextMessages or the context window"}}
+				return tardigrade.Output[ContextView]{View: ContextView{Phase: PhaseFailed, Reason: "compaction window cannot fit a complete message or tool exchange; increase MaxContextMessages or the context window"}}
 			}
-			return core.Output[ContextView]{View: ready}
+			return tardigrade.Output[ContextView]{View: ready}
 		}
 		boundary := boundaries[len(boundaries)-1]
 		if !more {
@@ -583,18 +562,18 @@ func compactAtom(options CompactionOptions) reactive.Atom[core.Output[ContextVie
 		callID := fmt.Sprintf("compact:%d:%d", through, state.Attempts)
 		data, _ := json.Marshal(append(summary, messages[:boundary]...))
 		selected, contextWindow := configured.Model, configured.ContextWindowTokens
-		return core.Output[ContextView]{View: ContextView{Position: ContextCompacting, EstimatedTokens: estimate}, Acts: map[string]core.Proposal{"compact": Summarize.Request(core.Request[ModelInput, model.Reply]{
+		return tardigrade.Output[ContextView]{View: ContextView{Phase: PhaseCompacting, EstimatedTokens: estimate}, Acts: map[string]tardigrade.Proposal{"compact": Summarize.Request(tardigrade.Request[ModelInput, model.Reply]{
 			Origin: state.Origin,
-			Input:  ModelInput{Model: selected, System: o.System, Tools: []model.Tool{}, Context: []model.Message{{Role: "user", Text: compactionRequestTextPrefix + string(data)}}},
-			OnRequested: func(core.Ref) []core.Event {
-				return []core.Event{ModelCalled{Purpose: PurposeCompaction, Model: selected, ContextWindowTokens: contextWindow, CallID: callID, Through: through}}
+			Input:  ModelInput{Model: selected, System: o.System, Tools: []model.Tool{}, Context: []model.Message{{Role: model.RoleUser, Text: compactionRequestTextPrefix + string(data)}}},
+			OnRequested: func(tardigrade.Ref) []tardigrade.Event {
+				return []tardigrade.Event{ModelCalled{Purpose: PurposeCompaction, Model: selected, ContextWindowTokens: contextWindow, CallID: callID, Through: through}}
 			},
-			OnSettled: func(o core.Outcome[model.Reply], _ core.Ref) []core.Event {
-				if o.Reason != nil {
-					return []core.Event{CompactionFailed{CallID: callID, Reason: o.Reason.Message}}
+			OnFinished: func(o tardigrade.Outcome[model.Reply], _ tardigrade.Ref) []tardigrade.Event {
+				if o.Err != nil {
+					return []tardigrade.Event{CompactionFailed{CallID: callID, Reason: o.Err.Message}}
 				}
 				usage := o.Value.Usage
-				return []core.Event{ModelReturned{Purpose: PurposeCompaction, CallID: callID, Text: o.Value.Text, Reasoning: o.Value.Reasoning, Usage: &usage}}
+				return []tardigrade.Event{ModelReturned{Purpose: PurposeCompaction, CallID: callID, Text: o.Value.Text, Reasoning: o.Value.Reasoning, Usage: &usage}}
 			},
 		})}}
 	})

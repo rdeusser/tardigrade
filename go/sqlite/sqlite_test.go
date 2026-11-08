@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rdeusser/tardigrade/go/core"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 type noted struct {
@@ -16,29 +16,29 @@ type noted struct {
 func (noted) EventType() string { return "sqlite.noted" }
 
 func TestJournalContract(t *testing.T) {
-	core.RegisterEvent[noted]()
+	tardigrade.RegisterEvent[noted]()
 	path := filepath.Join(t.TempDir(), "host.sqlite")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := core.ThreadCoordinate{Actor: "a", Instance: "main", Thread: "t1"}
-	if created, err := store.CreateThread(core.ThreadInfo{Address: address}); err != nil || !created {
+	address := tardigrade.ThreadCoordinate{Actor: "a", Instance: "main", Thread: "t1"}
+	if created, err := store.CreateThread(tardigrade.ThreadInfo{Address: address}); err != nil || !created {
 		t.Fatalf("create = %v, %v", created, err)
 	}
-	if created, _ := store.CreateThread(core.ThreadInfo{Address: address}); created {
+	if created, _ := store.CreateThread(tardigrade.ThreadInfo{Address: address}); created {
 		t.Fatal("thread created twice")
 	}
 	j := store.Journal(address)
-	ref := core.Ref{Seq: 1, Atom: "a", Act: "act"}
-	records := []core.Record{
-		{Event: noted{Text: "hi"}, RecordedAt: 5, Message: &core.Message{ID: "m1", From: core.Sender{Kind: "external", ID: "x"}}},
-		{Event: core.EffectRequested{Ref: ref, Origin: core.At(0), Request: core.StoredRequest{Act: "act", Digest: "d"}}},
+	ref := tardigrade.Ref{Seq: 1, Atom: "a", Act: "act"}
+	records := []tardigrade.Record{
+		{Event: noted{Text: "hi"}, RecordedAt: 5, Message: &tardigrade.Message{ID: "m1", From: tardigrade.Sender{Kind: "external", ID: "x"}}},
+		{Event: tardigrade.EffectRequested{Ref: ref, Origin: new(int64(0)), Request: tardigrade.StoredRequest{Act: "act", Digest: "d"}}},
 	}
-	if err := j.Append(0, records, core.Changes{PutInputs: map[string]json.RawMessage{ref.Key(): json.RawMessage(`{"big":true}`)}}); err != nil {
+	if err := j.Append(0, records, tardigrade.Changes{PutInputs: map[string]json.RawMessage{ref.Key(): json.RawMessage(`{"big":true}`)}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := j.Append(0, records[:1], core.Changes{}); !errors.Is(err, core.ErrConflict) {
+	if err := j.Append(0, records[:1], tardigrade.Changes{}); !errors.Is(err, tardigrade.ErrConflict) {
 		t.Fatalf("stale append = %v", err)
 	}
 	store.Close()
@@ -59,16 +59,16 @@ func TestJournalContract(t *testing.T) {
 	if record, position, _ := j.Message("m1"); record == nil || position != 0 {
 		t.Fatal("message index missing")
 	}
-	if got, _ := j.Invocation(core.Identity{Atom: "a", Act: "act", Origin: core.At(0)}); got == nil || *got != ref {
+	if got, _ := j.Invocation(tardigrade.Identity{Atom: "a", Act: "act", Origin: new(int64(0))}); got == nil || *got != ref {
 		t.Fatalf("invocation = %v", got)
 	}
-	if got, _ := j.Invocation(core.Identity{Atom: "a", Act: "act"}); got != nil {
+	if got, _ := j.Invocation(tardigrade.Identity{Atom: "a", Act: "act"}); got != nil {
 		t.Fatal("startup identity matched an origin")
 	}
 	if inputs, _ := j.Inputs(); string(inputs[ref.Key()]) != `{"big":true}` {
 		t.Fatalf("inputs = %v", inputs)
 	}
-	if err := j.SaveCheckpoint(core.Checkpoint{Position: 2, Atoms: map[string]core.AtomState{"x": {Position: 2, State: json.RawMessage("1")}}}); err != nil {
+	if err := j.SaveCheckpoint(tardigrade.Checkpoint{Position: 2, Atoms: map[string]tardigrade.AtomState{"x": {Position: 2, State: json.RawMessage("1")}}}); err != nil {
 		t.Fatal(err)
 	}
 	if checkpoint, _ := j.Checkpoint(); checkpoint == nil || checkpoint.Atoms["x"].Position != 2 {

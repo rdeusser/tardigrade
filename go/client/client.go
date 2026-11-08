@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,7 +16,7 @@ import (
 	"time"
 
 	"github.com/rdeusser/tardigrade/go/api"
-	"github.com/rdeusser/tardigrade/go/core"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 // DefaultPollInterval spaces Await's state reads.
@@ -56,9 +57,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, header h
 	if err != nil {
 		return err
 	}
-	for k, v := range header {
-		request.Header[k] = v
-	}
+	maps.Copy(request.Header, header)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -87,7 +86,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, header h
 	return json.Unmarshal(data, out)
 }
 
-func threadPath(t core.ThreadCoordinate) string {
+func threadPath(t tardigrade.ThreadCoordinate) string {
 	return "/v1/actors/" + url.PathEscape(t.Instance) + "/threads/" + url.PathEscape(t.Thread)
 }
 
@@ -98,14 +97,14 @@ func (c *Client) Metadata(ctx context.Context) (api.Metadata, error) {
 }
 
 // Methods lists the actor's methods with their schemas.
-func (c *Client) Methods(ctx context.Context) ([]core.MethodInfo, error) {
-	var out []core.MethodInfo
+func (c *Client) Methods(ctx context.Context) ([]tardigrade.MethodInfo, error) {
+	var out []tardigrade.MethodInfo
 	return out, c.do(ctx, http.MethodGet, "/v1/methods", nil, nil, &out)
 }
 
 // CreateThread allocates a thread; an empty name is generated and a nonempty parent creates a child.
-func (c *Client) CreateThread(ctx context.Context, instance, name, parent string) (core.ThreadCoordinate, error) {
-	var out core.ThreadCoordinate
+func (c *Client) CreateThread(ctx context.Context, instance, name, parent string) (tardigrade.ThreadCoordinate, error) {
+	var out tardigrade.ThreadCoordinate
 	body := map[string]string{}
 	if name != "" {
 		body["name"] = name
@@ -117,31 +116,31 @@ func (c *Client) CreateThread(ctx context.Context, instance, name, parent string
 }
 
 // Threads lists an instance's threads.
-func (c *Client) Threads(ctx context.Context, instance string) ([]core.ThreadInfo, error) {
-	var out []core.ThreadInfo
+func (c *Client) Threads(ctx context.Context, instance string) ([]tardigrade.ThreadInfo, error) {
+	var out []tardigrade.ThreadInfo
 	return out, c.do(ctx, http.MethodGet, "/v1/actors/"+url.PathEscape(instance)+"/threads", nil, nil, &out)
 }
 
 // Invoke calls a method under a caller-chosen ID; repeating the same call is absorbed.
-func (c *Client) Invoke(ctx context.Context, thread core.ThreadCoordinate, method, id string, input any) error {
+func (c *Client) Invoke(ctx context.Context, thread tardigrade.ThreadCoordinate, method, id string, input any) error {
 	header := http.Header{"Idempotency-Key": {id}}
 	return c.do(ctx, http.MethodPost, threadPath(thread)+"/methods/"+url.PathEscape(method), input, header, nil)
 }
 
 // Call reads a method call's state.
-func (c *Client) Call(ctx context.Context, thread core.ThreadCoordinate, method, id string) (api.CallState, error) {
+func (c *Client) Call(ctx context.Context, thread tardigrade.ThreadCoordinate, method, id string) (api.CallState, error) {
 	var out api.CallState
 	return out, c.do(ctx, http.MethodGet, threadPath(thread)+"/methods/"+url.PathEscape(method)+"/calls/"+url.PathEscape(id), nil, nil, &out)
 }
 
 // Await polls a call every interval until it is no longer pending; a zero interval uses DefaultPollInterval.
-func (c *Client) Await(ctx context.Context, thread core.ThreadCoordinate, method, id string, interval time.Duration) (api.CallState, error) {
+func (c *Client) Await(ctx context.Context, thread tardigrade.ThreadCoordinate, method, id string, interval time.Duration) (api.CallState, error) {
 	if interval == 0 {
 		interval = DefaultPollInterval
 	}
 	for {
 		state, err := c.Call(ctx, thread, method, id)
-		if err != nil || state.Status != core.StatusPending {
+		if err != nil || state.Status != tardigrade.StatusPending {
 			return state, err
 		}
 		select {
@@ -153,18 +152,18 @@ func (c *Client) Await(ctx context.Context, thread core.ThreadCoordinate, method
 }
 
 // CancelCall asks a cancellable call to stop.
-func (c *Client) CancelCall(ctx context.Context, thread core.ThreadCoordinate, method, id, reason string) error {
+func (c *Client) CancelCall(ctx context.Context, thread tardigrade.ThreadCoordinate, method, id, reason string) error {
 	return c.do(ctx, http.MethodPut, threadPath(thread)+"/methods/"+url.PathEscape(method)+"/calls/"+url.PathEscape(id)+"/cancellation", map[string]string{"reason": reason}, nil, nil)
 }
 
 // Events reads journal rows after a one-based cursor.
-func (c *Client) Events(ctx context.Context, thread core.ThreadCoordinate, after int64) ([]api.Row, error) {
+func (c *Client) Events(ctx context.Context, thread tardigrade.ThreadCoordinate, after int64) ([]api.Row, error) {
 	var out []api.Row
 	return out, c.do(ctx, http.MethodGet, threadPath(thread)+"/events?after="+strconv.FormatInt(after, 10), nil, nil, &out)
 }
 
 // Follow streams journal rows after a cursor until ctx ends or visit returns an error.
-func (c *Client) Follow(ctx context.Context, thread core.ThreadCoordinate, after int64, visit func(api.Row) error) error {
+func (c *Client) Follow(ctx context.Context, thread tardigrade.ThreadCoordinate, after int64, visit func(api.Row) error) error {
 	return c.stream(ctx, threadPath(thread)+"/events/stream?after="+strconv.FormatInt(after, 10), func(data []byte) error {
 		var row api.Row
 		if err := json.Unmarshal(data, &row); err != nil {
@@ -175,9 +174,9 @@ func (c *Client) Follow(ctx context.Context, thread core.ThreadCoordinate, after
 }
 
 // Updates streams transient execution updates produced after the connection opens.
-func (c *Client) Updates(ctx context.Context, thread core.ThreadCoordinate, visit func(core.Update) error) error {
+func (c *Client) Updates(ctx context.Context, thread tardigrade.ThreadCoordinate, visit func(tardigrade.Update) error) error {
 	return c.stream(ctx, threadPath(thread)+"/execution/stream", func(data []byte) error {
-		var update core.Update
+		var update tardigrade.Update
 		if err := json.Unmarshal(data, &update); err != nil {
 			return err
 		}

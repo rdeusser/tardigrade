@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/rdeusser/tardigrade/go/agent"
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/host"
 	"github.com/rdeusser/tardigrade/go/library"
 	"github.com/rdeusser/tardigrade/go/model"
 	"github.com/rdeusser/tardigrade/go/sqlite"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 // DefaultSystem is the agent prompt tdg serve uses without --system.
@@ -89,9 +89,9 @@ func serve(ctx context.Context, flags *flag.FlagSet, args []string, out io.Write
 	defer store.Close()
 	actor := agent.New(agent.Options{Name: *name, System: *system, Model: config.Default, ContextWindowTokens: window, Tools: library.Specs(libraries(nil, nil)...)})
 	router := &model.Router{Config: config}
-	h, err := host.New(host.Options{Actor: actor, Store: store, Acts: func(h *host.Host, address core.ThreadCoordinate) []core.Implementation {
+	h, err := host.New(host.Options{Actor: actor, Store: store, Handlers: func(h *host.Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler {
 		dir := library.LocalWorkspace{Dir: filepath.Join(*workspace, address.Instance, address.Thread)}
-		return agent.Acts(agent.Services{Model: router, Tools: library.NewRegistry(libraries(dir, h)...)})
+		return agent.Handlers(agent.Services{Model: router, Tools: library.NewRegistry(libraries(dir, h)...)})
 	}})
 	if err != nil {
 		return err

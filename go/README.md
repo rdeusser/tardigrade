@@ -10,7 +10,7 @@ Tardigrade for Go builds durable, event-driven actors in Go. It follows the mode
 go get github.com/rdeusser/tardigrade/go
 ```
 
-The module needs Go 1.24 and has one dependency, the pure Go SQLite driver `modernc.org/sqlite`.
+The module needs Go 1.27 and has one dependency, the pure Go SQLite driver `modernc.org/sqlite`.
 
 ## Packages
 
@@ -18,7 +18,7 @@ The module needs Go 1.24 and has one dependency, the pure Go SQLite driver `mode
 | --- | --- |
 | `reactive` | Dependency-tracked atom graph: sources, derived atoms, families, registries, snapshots |
 | `schema` | JSON Schemas derived from Go types and strict decoding at trust boundaries |
-| `core` | Events, durable and effect atoms, acts, methods, actors, journals, and the runtime |
+| `tardigrade` | Events, durable and effect atoms, acts and their handlers, methods, actors, journals, and the runtime |
 | `sqlite` | Thread journals and the thread directory in one SQLite database |
 | `host` | Runs an actor's threads, resumes unfinished work, delegates to child threads, serves HTTP |
 | `api`, `client` | Wire types of the HTTP method API and a Go client for it |
@@ -29,7 +29,7 @@ The module needs Go 1.24 and has one dependency, the pure Go SQLite driver `mode
 
 ## Counter actor
 
-A durable atom folds journal events into state. Handlers are typed by the event they accept, and each one registers its event type for decoding.
+A durable atom folds journal events into state. Each reducer, built with `tardigrade.On`, is typed by the event it accepts and registers that event type for decoding.
 
 ```go
 type Incremented struct{}
@@ -41,21 +41,21 @@ type Count struct {
 	At int64 `json:"at"`
 }
 
-var count = core.DurableAtom("count", Count{},
-	core.On(func(c Count, _ Incremented, m core.Meta) Count { return Count{N: c.N + 1, At: m.Position} }),
+var count = tardigrade.DurableAtom("count", Count{},
+	tardigrade.On(func(c Count, _ Incremented, m tardigrade.Meta) Count { return Count{N: c.N + 1, At: m.Position} }),
 )
 ```
 
-An act declares durable work, and an effect atom proposes it from state. The origin is the journal position of the event that made the invocation ready, which keeps invocations distinct across replays.
+An act is a kind of durable work with a typed input and result, such as a model call, a tool run, or a notification. Actors never run side effects directly: an effect atom proposes an act from state, the runtime journals the acceptance, runs the act with a handler, and journals how it finished. Replaying the journal therefore never repeats work that already finished. The origin is the journal position of the event that made the invocation ready, which keeps invocations distinct across replays.
 
 ```go
-var Notify = core.NewAct[int, struct{}]("notify")
+var Notify = tardigrade.NewAct[int, struct{}]("notify")
 
-var notify = core.EffectAtom(func(g reactive.Getter) core.Output[int] {
-	c := core.Get(g, count)
-	out := core.Output[int]{View: c.N}
+var notify = tardigrade.EffectAtom(func(g reactive.Getter) tardigrade.Output[int] {
+	c := tardigrade.Get(g, count)
+	out := tardigrade.Output[int]{View: c.N}
 	if c.N > 0 && c.N%2 == 0 {
-		out.Acts = map[string]core.Proposal{"notify": Notify.Request(core.Request[int, struct{}]{Origin: core.At(c.At), Input: c.N})}
+		out.Acts = map[string]tardigrade.Proposal{"notify": Notify.Request(tardigrade.Request[int, struct{}]{Origin: new(c.At), Input: c.N})}
 	}
 	return out
 })
@@ -64,26 +64,26 @@ var notify = core.EffectAtom(func(g reactive.Getter) core.Output[int] {
 Methods give callers typed inputs and outputs. An actor combines its root effect atom with methods.
 
 ```go
-var counter = core.DefineActor("counter", notify, map[string]core.Method{
-	"increment": core.NewMethod(core.MethodSpec[struct{}, int]{
-		OnReceive: func(struct{}, core.MethodContext) core.Event { return Incremented{} },
-		Result: func(_ struct{}, g reactive.Getter, _ core.MethodContext) *core.MethodResult[int] {
-			return core.Completed(core.Get(g, count).N)
+var counter = tardigrade.DefineActor("counter", notify, map[string]tardigrade.Method{
+	"increment": tardigrade.NewMethod(tardigrade.MethodSpec[struct{}, int]{
+		OnReceive: func(struct{}, tardigrade.MethodContext) tardigrade.Event { return Incremented{} },
+		Result: func(_ struct{}, g reactive.Getter, _ tardigrade.MethodContext) *tardigrade.MethodResult[int] {
+			return tardigrade.Completed(tardigrade.Get(g, count).N)
 		},
 	}),
 })
 ```
 
-A host supplies the act implementations and serves the actor.
+A handler is the Go code that runs an act; `Act.Handle` builds one. The actor definition holds no handlers, so a host can supply different ones per thread, such as a workspace per thread, or fakes in tests.
 
 ```go
 store, _ := sqlite.Open(".tardigrade/data/host.sqlite")
-notifyImpl := Notify.Implement(func(_ *core.Execution, n int) (core.Result[struct{}], error) {
+notify := Notify.Handle(func(_ *tardigrade.Execution, n int) (tardigrade.Result[struct{}], error) {
 	log.Printf("%d is even", n)
-	return core.Value(struct{}{}), nil
+	return tardigrade.Value(struct{}{}), nil
 }, nil)
-h, _ := host.New(host.Options{Actor: counter, Store: store, Acts: func(*host.Host, core.ThreadCoordinate) []core.Implementation {
-	return []core.Implementation{notifyImpl}
+h, _ := host.New(host.Options{Actor: counter, Store: store, Handlers: func(*host.Host, tardigrade.ThreadCoordinate) []tardigrade.Handler {
+	return []tardigrade.Handler{notify}
 }})
 http.ListenAndServe(":4242", h.Handler(host.HTTPOptions{}))
 ```
@@ -92,7 +92,7 @@ http.ListenAndServe(":4242", h.Handler(host.HTTPOptions{}))
 
 ## Agent actor
 
-`agent.New` assembles the agent from its options, and `agent.Acts` implements its acts on a host. Tool specs go to the actor; tool implementations go to the host, so each thread can own a workspace.
+`agent.New` assembles the agent from its options. Its acts are the model call, the compaction summary, the tool run, and the permission and budget requests; `agent.Handlers` returns the handlers that run them on a host. Tool specs go to the actor and tool code goes to the handlers, so each thread can own a workspace.
 
 ```go
 config, _ := model.ParseConfig([]byte(os.Getenv("TARDIGRADE_CONFIG")))
@@ -102,9 +102,9 @@ meeseeks := agent.New(agent.Options{
 	Tools: library.Specs(library.Filesystem(nil)),
 })
 router := &model.Router{Config: config}
-h, _ := host.New(host.Options{Actor: meeseeks, Store: store, Acts: func(_ *host.Host, t core.ThreadCoordinate) []core.Implementation {
+h, _ := host.New(host.Options{Actor: meeseeks, Store: store, Handlers: func(_ *host.Host, t tardigrade.ThreadCoordinate) []tardigrade.Handler {
 	workspace := library.LocalWorkspace{Dir: filepath.Join("workspace", t.Instance, t.Thread)}
-	return agent.Acts(agent.Services{Model: router, Tools: library.NewRegistry(library.Filesystem(workspace))})
+	return agent.Handlers(agent.Services{Model: router, Tools: library.NewRegistry(library.Filesystem(workspace))})
 }})
 ```
 
@@ -157,9 +157,9 @@ When `TARDIGRADE_TOKEN` is set, every route except `/healthz` requires `Authoriz
 
 ## Runtime guarantees
 
-Each thread has one runtime. A commit appends an event and the events its act callbacks derive as one journal batch; when a reducer rejects the batch or the append fails, the runtime restores its registry and operation table (`core/runtime_test.go`, `TestRejectedEventLeavesStateUnchanged`). Accepted work is journaled before it runs, so a reopened journal resumes unfinished work once and records its outcome (`TestReplayResumesPendingWorkOnce`). Retries journal each attempt and its absolute wake time (`TestRetryJournalsAttempts`). Cancellation journals the decision, interrupts the work, and runs the act's cleanup until it succeeds (`TestCancellationRunsCleanup`). A panic in an act records a terminal defect and stops the actor (`TestPanicStopsActor`). Checkpoints save durable atom states while no work is active, so replay folds only later records (`TestCheckpointLimitsReplay`). A host records which threads hold unfinished work and resumes them when it opens the store (`host/host_test.go`, `TestRestartResumesActiveThreads`).
+Each thread has one runtime. A commit appends an event and the events its act callbacks derive as one journal batch; when a reducer rejects the batch or the append fails, the runtime restores its registry and operation table (`tardigrade/runtime_test.go`, `TestRejectedEventLeavesStateUnchanged`). Accepted work is journaled before it runs, so a reopened journal resumes unfinished work once and records its outcome (`TestReplayResumesPendingWorkOnce`). Retries journal each attempt and its absolute wake time (`TestRetryJournalsAttempts`). Cancellation journals the decision, interrupts the work, and runs the act's cleanup until it succeeds (`TestCancellationRunsCleanup`). A panic in an act records a terminal defect and stops the actor (`TestPanicStopsActor`). Checkpoints save durable atom states while no work is active, so replay folds only later records (`TestCheckpointLimitsReplay`). A host records which threads hold unfinished work and resumes them when it opens the store (`host/host_test.go`, `TestRestartResumesActiveThreads`).
 
-Deferred work settles through its executor: `local` for producers started with `core.Fork`, `clock` for timers, `thread` for method calls on child threads, and the host's `core.Promises` service for any other executor, which calls `Runtime.Settle`.
+Work that finishes later returns a handle, and its executor finishes it: `tardigrade.ExecutorLocal` for producers started with `tardigrade.Fork`, `tardigrade.ExecutorClock` for timers, `tardigrade.ExecutorThread` for method calls on child threads, and the host's `tardigrade.Promises` service for any other executor, which calls `Runtime.Finish`. Work finishes with a value or a `tardigrade.Failure`, and act callbacks receive that as a `tardigrade.Outcome` with `Value` and `Err`.
 
 ## Policies
 
@@ -167,11 +167,11 @@ Every policy value is exported and overridable where it applies.
 
 | Default | Value | Override |
 | --- | --- | --- |
-| `core.DefaultAttemptTimeout` | 60s | `core.Policy.AttemptTimeout`, `core.RetryPolicy.AttemptTimeout` |
-| `core.DefaultPromiseTimeout` | 60s | `core.Policy.PromiseTimeout`, `core.PromiseOptions.Timeout` |
-| `core.DefaultCancellationRetry` | 5s | `core.Policy.CancellationRetry` |
-| `core.DefaultCheckpointEvery` | 500 records | `core.Policy.CheckpointEvery` |
-| `core.DefaultInputDigestMinBytes` | 2 KiB | `core.Policy.InputDigestMinBytes` |
+| `tardigrade.DefaultAttemptTimeout` | 60s | `tardigrade.Policy.AttemptTimeout`, `tardigrade.RetryPolicy.AttemptTimeout` |
+| `tardigrade.DefaultPromiseTimeout` | 60s | `tardigrade.Policy.PromiseTimeout`, `tardigrade.PromiseOptions.Timeout` |
+| `tardigrade.DefaultCancellationRetry` | 5s | `tardigrade.Policy.CancellationRetry` |
+| `tardigrade.DefaultCheckpointEvery` | 500 records | `tardigrade.Policy.CheckpointEvery` |
+| `tardigrade.DefaultInputDigestMinBytes` | 2 KiB | `tardigrade.Policy.InputDigestMinBytes` |
 | `host.DefaultMaxDepth` | 3 | `host.Options.MaxDepth` |
 | `host.DefaultStreamBuffer` | 64 updates | `host.Options.StreamBuffer` |
 | `model.DefaultMaxOutputTokens` | 32,768 | `models.<id>.maxOutputTokens` |
@@ -180,10 +180,10 @@ Every policy value is exported and overridable where it applies.
 | `agent.DefaultTriggerRatio`, `agent.DefaultRetainRatio` | 0.8, 0.5 | `agent.CompactionOptions` |
 | `library.DefaultFilesystemPolicy` | 30s commands, 32,768 characters | `library.LocalWorkspace.Policy` |
 
-`core.NoDeadline` disables a timeout.
+`tardigrade.NoDeadline` disables a timeout.
 
 ## Scope
 
-The Go module covers the actor runtime, the self-hosted SQLite host, the HTTP method API and its client, the model providers, the tool libraries, the agent, and the CLI. Cloudflare and Celld hosting stay in TypeScript because Durable Objects are JavaScript classes. Code mode stays in TypeScript because it runs model-written JavaScript; the Go agent calls tools directly. The Go runtime keeps act inputs at or above `core.DefaultInputDigestMinBytes` beside the journal until their work completes, and keeps file content inline in events.
+The Go module covers the actor runtime, the self-hosted SQLite host, the HTTP method API and its client, the model providers, the tool libraries, the agent, and the CLI. Cloudflare and Celld hosting stay in TypeScript because Durable Objects are JavaScript classes. Code mode stays in TypeScript because it runs model-written JavaScript; the Go agent calls tools directly. The Go runtime keeps act inputs at or above `tardigrade.DefaultInputDigestMinBytes` beside the journal until their work completes, and keeps file content inline in events.
 
-Event types evolve through Go's `encoding/json`: a type that reads an older shape implements `UnmarshalJSON`. Journal records whose event type no process registered decode as `core.RawEvent`, which no reducer accepts.
+Event types evolve through Go's `encoding/json`: a type that reads an older shape implements `UnmarshalJSON`. Journal records whose event type no process registered decode as `tardigrade.RawEvent`, which no reducer accepts.

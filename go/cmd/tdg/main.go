@@ -18,8 +18,8 @@ import (
 
 	"github.com/rdeusser/tardigrade/go/api"
 	"github.com/rdeusser/tardigrade/go/client"
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/model"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 const usage = `tdg drives Tardigrade actors.
@@ -85,8 +85,8 @@ func parse(flags *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-func (r remote) thread(name string) core.ThreadCoordinate {
-	return core.ThreadCoordinate{Instance: r.instance, Thread: name}
+func (r remote) thread(name string) tardigrade.ThreadCoordinate {
+	return tardigrade.ThreadCoordinate{Instance: r.instance, Thread: name}
 }
 
 func printJSON(out io.Writer, value any) error {
@@ -193,7 +193,7 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return err
 		}
 		if !*wait {
-			return printJSON(out, map[string]string{"id": *id, "status": core.StatusPending})
+			return printJSON(out, map[string]any{"id": *id, "status": tardigrade.StatusPending})
 		}
 		state, err := r.client.Await(ctx, thread, rest[1], *id, 0)
 		if err != nil {
@@ -270,7 +270,7 @@ func chat(ctx context.Context, r remote, name string, in io.Reader, out io.Write
 	defer cancel()
 	streamed := make(chan bool, 1)
 	go func() {
-		_ = r.client.Updates(streamCtx, thread, func(u core.Update) error {
+		_ = r.client.Updates(streamCtx, thread, func(u tardigrade.Update) error {
 			var delta struct {
 				Type string `json:"type"`
 				Kind string `json:"kind"`
@@ -315,7 +315,7 @@ func chat(ctx context.Context, r remote, name string, in io.Reader, out io.Write
 		default:
 		}
 		switch state.Status {
-		case core.StatusCompleted:
+		case tardigrade.StatusCompleted:
 			var reply struct {
 				Text string `json:"text"`
 			}
@@ -324,7 +324,7 @@ func chat(ctx context.Context, r remote, name string, in io.Reader, out io.Write
 				fmt.Fprint(out, reply.Text)
 			}
 			fmt.Fprintln(out)
-		case core.StatusFailed:
+		case tardigrade.StatusFailed:
 			fmt.Fprintf(out, "\n[failed] %s\n", state.Error)
 		default:
 			fmt.Fprintf(out, "\n[%s] %s\n", state.Status, state.Reason)

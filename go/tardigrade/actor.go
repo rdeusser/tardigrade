@@ -1,4 +1,4 @@
-package core
+package tardigrade
 
 import (
 	"encoding/json"
@@ -16,17 +16,20 @@ type MethodContext struct {
 	Method string
 }
 
+// CallStatus is the state of a method call.
+type CallStatus string
+
 // Method call statuses.
 const (
-	StatusPending   = "pending"
-	StatusCompleted = "completed"
-	StatusFailed    = "failed"
-	StatusCancelled = "cancelled"
+	StatusPending   CallStatus = "pending"
+	StatusCompleted CallStatus = "completed"
+	StatusFailed    CallStatus = "failed"
+	StatusCancelled CallStatus = "cancelled"
 )
 
 // MethodResult is a terminal method outcome.
 type MethodResult[O any] struct {
-	Status string
+	Status CallStatus
 	Output O
 	Error  string
 	Reason string
@@ -49,7 +52,7 @@ func CancelledResult[O any](reason string) *MethodResult[O] {
 
 // MethodState is a method call's state as callers read it.
 type MethodState struct {
-	Status string          `json:"status"`
+	Status CallStatus      `json:"status"`
 	Output json.RawMessage `json:"output,omitempty"`
 	Error  string          `json:"error,omitempty"`
 	Reason string          `json:"reason,omitempty"`
@@ -74,7 +77,7 @@ type Method struct {
 // NewMethod defines a method. Inputs are decoded strictly with schema.Decode.
 func NewMethod[I, O any](spec MethodSpec[I, O]) Method {
 	if spec.OnReceive == nil || spec.Result == nil {
-		panic(fmt.Errorf("core: methods require OnReceive and Result"))
+		panic(fmt.Errorf("tardigrade: methods require OnReceive and Result"))
 	}
 	m := Method{
 		inputSchema:  schema.Of[I](),
@@ -135,11 +138,11 @@ type Actor struct {
 // DefineActor assembles an actor from its root effect atom and methods. Names must be nonempty and contain no slash.
 func DefineActor[V any](name string, root reactive.Atom[Output[V]], methods map[string]Method) *Actor {
 	if name == "" || strings.Contains(name, "/") {
-		panic(fmt.Errorf("core: actor name must be nonempty and contain no slash"))
+		panic(fmt.Errorf("tardigrade: actor name must be nonempty and contain no slash"))
 	}
 	for method := range methods {
 		if method == "" {
-			panic(fmt.Errorf("core: method names must be nonempty"))
+			panic(fmt.Errorf("tardigrade: method names must be nonempty"))
 		}
 	}
 	return &Actor{

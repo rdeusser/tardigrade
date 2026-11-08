@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -19,20 +20,34 @@ type Ref struct {
 
 func (r Ref) String() string { return r.Provider + "/" + r.ModelID }
 
+// PartType is the kind of a content part.
+type PartType string
+
+// Content part types.
+const (
+	PartText PartType = "text"
+	PartFile PartType = "file"
+)
+
 // Part is one piece of message content. Files carry their bytes inline.
 type Part struct {
-	Type      string `json:"type" enum:"text,file"`
-	Text      string `json:"text,omitempty"`
-	MediaType string `json:"mediaType,omitempty"`
-	Data      []byte `json:"data,omitempty"`
-	Filename  string `json:"filename,omitempty"`
+	Type      PartType `json:"type" enum:"text,file"`
+	Text      string   `json:"text,omitempty"`
+	MediaType string   `json:"mediaType,omitempty"`
+	Data      []byte   `json:"data,omitempty"`
+	Filename  string   `json:"filename,omitempty"`
+}
+
+// IsImage reports whether the part is an image file.
+func (p Part) IsImage() bool {
+	return p.Type == PartFile && strings.HasPrefix(p.MediaType, "image/")
 }
 
 // TextOf joins a content's text parts with sep.
 func TextOf(parts []Part, sep string) string {
 	text := ""
 	for _, p := range parts {
-		if p.Type == "text" {
+		if p.Type == PartText {
 			if text != "" {
 				text += sep
 			}
@@ -52,14 +67,24 @@ type ToolCall struct {
 // Continuation is provider-native assistant content, such as signed reasoning, replayed verbatim to the same provider, protocol, and model.
 type Continuation struct {
 	Provider string          `json:"provider"`
-	Protocol string          `json:"protocol"`
+	Protocol Protocol        `json:"protocol"`
 	Model    string          `json:"model"`
 	Payload  json.RawMessage `json:"payload"`
 }
 
-// Message is one conversation turn. Role "user" carries Text or Content; "assistant" carries Text, ToolCalls, and an optional Continuation; "tool" carries a ToolCallID result as Text or Content with Error set on failure.
+// Role is who a message comes from.
+type Role string
+
+// Message roles.
+const (
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
+)
+
+// Message is one conversation turn. RoleUser carries Text or Content; RoleAssistant carries Text, ToolCalls, and an optional Continuation; RoleTool carries a ToolCallID result as Text or Content with Error set on failure.
 type Message struct {
-	Role         string        `json:"role" enum:"user,assistant,tool"`
+	Role         Role          `json:"role" enum:"user,assistant,tool"`
 	Text         string        `json:"text,omitempty"`
 	Content      []Part        `json:"content,omitempty"`
 	ToolCalls    []ToolCall    `json:"toolCalls,omitempty"`
@@ -96,11 +121,14 @@ type Usage struct {
 	USD        *float64 `json:"usd"`
 }
 
+// FinishReason is why a reply ended.
+type FinishReason string
+
 // Finish reasons.
 const (
-	FinishStop      = "stop"
-	FinishLength    = "length"
-	FinishToolCalls = "tool_calls"
+	FinishStop      FinishReason = "stop"
+	FinishLength    FinishReason = "length"
+	FinishToolCalls FinishReason = "tool_calls"
 )
 
 // Reply is a completed model call.
@@ -109,14 +137,23 @@ type Reply struct {
 	Reasoning    string        `json:"reasoning,omitempty"`
 	ToolCalls    []ToolCall    `json:"toolCalls"`
 	Usage        Usage         `json:"usage"`
-	FinishReason string        `json:"finishReason"`
+	FinishReason FinishReason  `json:"finishReason"`
 	Continuation *Continuation `json:"continuation,omitempty"`
 }
 
-// Delta is streamed reply text of Type "text" or "reasoning".
+// DeltaType is the kind of streamed text.
+type DeltaType string
+
+// Delta types.
+const (
+	DeltaText      DeltaType = "text"
+	DeltaReasoning DeltaType = "reasoning"
+)
+
+// Delta is streamed reply text.
 type Delta struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type DeltaType `json:"type"`
+	Text string    `json:"text"`
 }
 
 // Model generates replies. onDelta, when non-nil, receives streamed text as it arrives.
@@ -124,10 +161,13 @@ type Model interface {
 	Generate(ctx context.Context, request Request, onDelta func(Delta)) (Reply, error)
 }
 
+// Protocol is a provider wire protocol.
+type Protocol string
+
 // Protocols the providers in this package speak.
 const (
-	AnthropicMessages     = "anthropic-messages"
-	OpenAIChatCompletions = "openai-chat-completions"
+	AnthropicMessages     Protocol = "anthropic-messages"
+	OpenAIChatCompletions Protocol = "openai-chat-completions"
 )
 
 // Defaults for provider calls.
@@ -139,8 +179,8 @@ const (
 
 // ProviderConfig connects one provider.
 type ProviderConfig struct {
-	BaseURL  string `json:"baseUrl"`
-	Protocol string `json:"protocol"`
+	BaseURL  string   `json:"baseUrl"`
+	Protocol Protocol `json:"protocol"`
 	// Env names environment variables holding the API key; the first nonempty one is used.
 	Env []string `json:"env,omitempty"`
 	// MaxTokensField names the chat-completions output bound field; empty uses "max_tokens".
@@ -294,12 +334,10 @@ func Retryable(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	var status *HTTPError
-	if errors.As(err, &status) {
+	if status, ok := errors.AsType[*HTTPError](err); ok {
 		return status.Status == http.StatusTooManyRequests || status.Status >= 500
 	}
-	var stream *StreamError
-	if errors.As(err, &stream) {
+	if stream, ok := errors.AsType[*StreamError](err); ok {
 		return stream.Retryable
 	}
 	return true

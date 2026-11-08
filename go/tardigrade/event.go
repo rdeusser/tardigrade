@@ -1,4 +1,4 @@
-package core
+package tardigrade
 
 import (
 	"bytes"
@@ -37,12 +37,12 @@ func RegisterEvent[E Event]() string {
 
 func register(t reflect.Type, name string) string {
 	if name == "" {
-		panic(fmt.Errorf("core: event type %s has an empty name", t))
+		panic(fmt.Errorf("tardigrade: event type %s has an empty name", t))
 	}
 	catalog.Lock()
 	defer catalog.Unlock()
 	if prior, ok := catalog.types[name]; ok && prior != t {
-		panic(fmt.Errorf("core: event name %q is claimed by %s and %s", name, prior, t))
+		panic(fmt.Errorf("tardigrade: event name %q is claimed by %s and %s", name, prior, t))
 	}
 	catalog.types[name] = t
 	return name
@@ -117,9 +117,22 @@ func (r Ref) Key() string {
 	return "[" + strconv.FormatInt(r.Seq, 10) + "," + string(name) + "," + string(act) + "]"
 }
 
-// Handle identifies an eventual result held by an executor. Executor "local" names a forked producer, "clock" a timer at At, and any other executor is resolved by the host's Promises service.
+// Executor names who produces a deferred result.
+type Executor string
+
+// Executors the runtime and host resolve. Any other executor is resolved by the host's Promises service.
+const (
+	// ExecutorLocal is a producer started with Fork.
+	ExecutorLocal Executor = "local"
+	// ExecutorClock is a timer that finishes at Handle.At with Handle.Value.
+	ExecutorClock Executor = "clock"
+	// ExecutorThread is a method call on a child thread, resolved by the host.
+	ExecutorThread Executor = "thread"
+)
+
+// Handle identifies an eventual result held by an executor.
 type Handle struct {
-	Executor string          `json:"executor"`
+	Executor Executor        `json:"executor"`
 	ID       string          `json:"id"`
 	Endpoint string          `json:"endpoint,omitempty"`
 	Mode     string          `json:"mode,omitempty"`
@@ -127,21 +140,28 @@ type Handle struct {
 	Value    json.RawMessage `json:"value,omitempty"`
 }
 
-// Reason describes a rejection.
-type Reason struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
-}
+// FailureKind classifies a failure.
+type FailureKind string
 
-// Rejection kinds recorded in Reason.Kind.
+// Failure kinds.
 const (
-	ReasonFailed         = "failed"
-	ReasonAttemptTimeout = "attempt_timeout"
-	ReasonPromiseTimeout = "promise_timeout"
-	ReasonCancelled      = "cancelled"
+	// FailureError is an error the work returned.
+	FailureError FailureKind = "error"
+	// FailureAttemptTimeout is an attempt that outlived its deadline.
+	FailureAttemptTimeout FailureKind = "attempt_timeout"
+	// FailurePromiseTimeout is deferred work that did not finish before its deadline.
+	FailurePromiseTimeout FailureKind = "promise_timeout"
+	// FailureCancelled is work cancelled before it finished.
+	FailureCancelled FailureKind = "cancelled"
 )
 
-func (r Reason) Error() string { return r.Message }
+// Failure is why work finished without a value. It implements error.
+type Failure struct {
+	Kind    FailureKind `json:"kind"`
+	Message string      `json:"message"`
+}
+
+func (f Failure) Error() string { return f.Message }
 
 // StoredRequest is an accepted act request. Large inputs are retained beside the journal until the work completes and the event keeps their digest.
 type StoredRequest struct {
@@ -169,11 +189,11 @@ type PromiseRecord struct {
 	DeadlineAt *int64 `json:"deadlineAt,omitempty"`
 }
 
-// EffectSettled records an execution's outcome: Result when fulfilled, Reason when rejected.
-type EffectSettled struct {
+// EffectFinished records how an execution finished: Result on success, Err on failure.
+type EffectFinished struct {
 	Ref    Ref              `json:"ref"`
 	Result *ExecutionResult `json:"result,omitempty"`
-	Reason *Reason          `json:"reason,omitempty"`
+	Err    *Failure         `json:"error,omitempty"`
 }
 
 // EffectDied records a terminal defect; the actor stops proposing work.
@@ -182,11 +202,11 @@ type EffectDied struct {
 	Diagnostic string `json:"diagnostic"`
 }
 
-// PromiseSettled records the eventual outcome of a deferred execution.
-type PromiseSettled struct {
-	Ref    Ref             `json:"ref"`
-	Value  json.RawMessage `json:"value,omitempty"`
-	Reason *Reason         `json:"reason,omitempty"`
+// PromiseFinished records how deferred work finished: Value on success, Err on failure.
+type PromiseFinished struct {
+	Ref   Ref             `json:"ref"`
+	Value json.RawMessage `json:"value,omitempty"`
+	Err   *Failure        `json:"error,omitempty"`
 }
 
 // RetryScheduled records the next attempt and its absolute wake time in Unix milliseconds. Phase is empty for execution and "cancellation" for cleanup.
@@ -204,14 +224,14 @@ type EffectCancelled struct {
 	Reason string `json:"reason"`
 }
 
-// CancellationSettled records cleanup completion; a nonempty Failure records a final cleanup failure.
-type CancellationSettled struct {
-	Ref     Ref    `json:"ref"`
-	Failure string `json:"failure,omitempty"`
+// CleanupFinished records the end of cleanup; a nonempty Error records a final cleanup failure.
+type CleanupFinished struct {
+	Ref   Ref    `json:"ref"`
+	Error string `json:"error,omitempty"`
 }
 
-// CancellationDied records a cleanup defect.
-type CancellationDied struct {
+// CleanupDied records a cleanup defect.
+type CleanupDied struct {
 	Ref        Ref    `json:"ref"`
 	Diagnostic string `json:"diagnostic"`
 }
@@ -239,25 +259,25 @@ type ThreadCreated struct {
 	Depth   int               `json:"depth"`
 }
 
-func (EffectRequested) EventType() string     { return "EffectRequested" }
-func (EffectSettled) EventType() string       { return "EffectSettled" }
-func (EffectDied) EventType() string          { return "EffectDied" }
-func (PromiseSettled) EventType() string      { return "PromiseSettled" }
-func (RetryScheduled) EventType() string      { return "RetryScheduled" }
-func (EffectCancelled) EventType() string     { return "EffectCancelled" }
-func (CancellationSettled) EventType() string { return "CancellationSettled" }
-func (CancellationDied) EventType() string    { return "CancellationDied" }
-func (ThreadCreated) EventType() string       { return "ThreadCreated" }
+func (EffectRequested) EventType() string { return "EffectRequested" }
+func (EffectFinished) EventType() string  { return "EffectFinished" }
+func (EffectDied) EventType() string      { return "EffectDied" }
+func (PromiseFinished) EventType() string { return "PromiseFinished" }
+func (RetryScheduled) EventType() string  { return "RetryScheduled" }
+func (EffectCancelled) EventType() string { return "EffectCancelled" }
+func (CleanupFinished) EventType() string { return "CleanupFinished" }
+func (CleanupDied) EventType() string     { return "CleanupDied" }
+func (ThreadCreated) EventType() string   { return "ThreadCreated" }
 
 func init() {
 	RegisterEvent[EffectRequested]()
-	RegisterEvent[EffectSettled]()
+	RegisterEvent[EffectFinished]()
 	RegisterEvent[EffectDied]()
-	RegisterEvent[PromiseSettled]()
+	RegisterEvent[PromiseFinished]()
 	RegisterEvent[RetryScheduled]()
 	RegisterEvent[EffectCancelled]()
-	RegisterEvent[CancellationSettled]()
-	RegisterEvent[CancellationDied]()
+	RegisterEvent[CleanupFinished]()
+	RegisterEvent[CleanupDied]()
 	RegisterEvent[ThreadCreated]()
 }
 
@@ -266,19 +286,19 @@ func lifecycleRef(e Event) (Ref, bool) {
 	switch v := e.(type) {
 	case EffectRequested:
 		return v.Ref, true
-	case EffectSettled:
+	case EffectFinished:
 		return v.Ref, true
 	case EffectDied:
 		return v.Ref, true
-	case PromiseSettled:
+	case PromiseFinished:
 		return v.Ref, true
 	case RetryScheduled:
 		return v.Ref, true
 	case EffectCancelled:
 		return v.Ref, true
-	case CancellationSettled:
+	case CleanupFinished:
 		return v.Ref, true
-	case CancellationDied:
+	case CleanupDied:
 		return v.Ref, true
 	}
 	return Ref{}, false

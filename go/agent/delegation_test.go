@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/rdeusser/tardigrade/go/agent"
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/host"
 	"github.com/rdeusser/tardigrade/go/library"
 	"github.com/rdeusser/tardigrade/go/model"
 	"github.com/rdeusser/tardigrade/go/sqlite"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 type router struct {
@@ -25,14 +25,14 @@ type router struct {
 func (r *router) Generate(_ context.Context, req model.Request, _ func(model.Delta)) (model.Reply, error) {
 	last := req.Messages[len(req.Messages)-1]
 	r.mu.Lock()
-	r.seen = append(r.seen, last.Role+":"+last.Text)
+	r.seen = append(r.seen, string(last.Role)+":"+last.Text)
 	r.mu.Unlock()
 	switch {
-	case last.Role == "user" && last.Text == "research tardigrades":
+	case last.Role == model.RoleUser && last.Text == "research tardigrades":
 		return toolCall("delegate_task", `{"message":"find one fact"}`), nil
-	case last.Role == "user" && last.Text == "find one fact":
+	case last.Role == model.RoleUser && last.Text == "find one fact":
 		return text("they survive vacuum"), nil
-	case last.Role == "tool":
+	case last.Role == model.RoleTool:
 		return text("delegated"), nil
 	case strings.Contains(last.Text, "they survive vacuum"):
 		return text("the child says they survive vacuum"), nil
@@ -49,8 +49,8 @@ func TestDelegationReturnsChildAnswerAsTurn(t *testing.T) {
 	toMessage := func(message string) any { return agent.MessageInput{Text: message} }
 	actor := agent.New(agent.Options{Name: "researcher", System: "Research.", Model: ref, ContextWindowTokens: 100_000, Tools: library.Specs(library.Agents(nil, toMessage))})
 	fake := &router{}
-	h, err := host.New(host.Options{Actor: actor, Store: store, Acts: func(h *host.Host, _ core.ThreadCoordinate) []core.Implementation {
-		return agent.Acts(agent.Services{Model: fake, Tools: library.NewRegistry(library.Agents(h, toMessage))})
+	h, err := host.New(host.Options{Actor: actor, Store: store, Handlers: func(h *host.Host, _ tardigrade.ThreadCoordinate) []tardigrade.Handler {
+		return agent.Handlers(agent.Services{Model: fake, Tools: library.NewRegistry(library.Agents(h, toMessage))})
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -61,13 +61,13 @@ func TestDelegationReturnsChildAnswerAsTurn(t *testing.T) {
 	}
 	rt, _ := h.Thread("main", "lead")
 	input, _ := json.Marshal(agent.MessageInput{Text: "research tardigrades"})
-	if err := rt.Invoke("message", "m1", core.Sender{Kind: "external", ID: "test"}, input); err != nil {
+	if err := rt.Invoke("message", "m1", tardigrade.Sender{Kind: "external", ID: "test"}, input); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.After(10 * time.Second)
 	for {
-		turns := core.Read(rt, agent.InferenceState).Turns
-		if len(turns) == 2 && turns[1].Settlement == agent.OutcomeCompleted {
+		turns := tardigrade.Read(rt, agent.TurnState).All
+		if len(turns) == 2 && turns[1].Outcome == agent.OutcomeCompleted {
 			if *turns[1].Answer != "the child says they survive vacuum" {
 				t.Fatalf("follow-up answer = %q", *turns[1].Answer)
 			}

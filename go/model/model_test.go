@@ -29,15 +29,15 @@ func sse(t *testing.T, check func(body map[string]any, r *http.Request), events 
 	}))
 }
 
-func router(baseURL, protocol string) *Router {
+func router(baseURL string, protocol Protocol) *Router {
 	return &Router{Config: Config{Providers: map[string]ProviderConfig{"p": {BaseURL: baseURL, Protocol: protocol, Env: []string{"KEY"}}}},
 		Getenv: func(string) string { return "secret" }}
 }
 
 var conversation = []Message{
-	{Role: "user", Text: "weather?"},
-	{Role: "assistant", Text: "checking", ToolCalls: []ToolCall{{ID: "call_1", Name: "lookup", Input: json.RawMessage(`{"city":"Oslo"}`)}}},
-	{Role: "tool", ToolCallID: "call_1", Name: "lookup", Text: "rain"},
+	{Role: RoleUser, Text: "weather?"},
+	{Role: RoleAssistant, Text: "checking", ToolCalls: []ToolCall{{ID: "call_1", Name: "lookup", Input: json.RawMessage(`{"city":"Oslo"}`)}}},
+	{Role: RoleTool, ToolCallID: "call_1", Name: "lookup", Text: "rain"},
 }
 
 func TestAnthropicStreamsTextToolsAndUsage(t *testing.T) {
@@ -65,7 +65,7 @@ func TestAnthropicStreamsTextToolsAndUsage(t *testing.T) {
 	defer server.Close()
 	var deltas []string
 	reply, err := router(server.URL, AnthropicMessages).Generate(context.Background(), Request{Model: Ref{Provider: "p", ModelID: "m"}, System: "be brief", Messages: conversation},
-		func(d Delta) { deltas = append(deltas, d.Type+":"+d.Text) })
+		func(d Delta) { deltas = append(deltas, string(d.Type)+":"+d.Text) })
 	if err != nil {
 		t.Fatal(err)
 	}

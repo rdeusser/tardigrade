@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/sqlite"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 // Defaults for Options fields left zero.
@@ -21,17 +21,14 @@ const (
 	DefaultStreamBuffer = 64
 )
 
-// ThreadExecutor names the promise executor for method calls on child threads.
-const ThreadExecutor = "thread"
-
 // Options configure a host.
 type Options struct {
-	Actor *core.Actor
+	Actor *tardigrade.Actor
 	Store *sqlite.Store
-	// Acts returns a thread's act implementations; implementations may capture the host and the thread address.
-	Acts   func(h *Host, address core.ThreadCoordinate) []core.Implementation
-	Policy core.Policy
-	Clock  core.Clock
+	// Handlers returns the act handlers of a thread; handlers may capture the host and the thread address.
+	Handlers func(h *Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler
+	Policy   tardigrade.Policy
+	Clock    tardigrade.Clock
 	// MaxDepth bounds child thread nesting below a root thread.
 	MaxDepth int
 	// StreamBuffer bounds unread execution updates per subscriber; further updates are dropped.
@@ -45,25 +42,25 @@ var ErrUnknownThread = errors.New("unknown thread")
 type Host struct {
 	opts    Options
 	mu      sync.Mutex
-	threads map[core.ThreadCoordinate]*core.Runtime
-	opening map[core.ThreadCoordinate]*sync.Mutex
-	watches map[core.ThreadCoordinate]map[string]watch
-	subs    map[core.ThreadCoordinate]map[chan core.Update]struct{}
-	active  map[core.ThreadCoordinate]bool
+	threads map[tardigrade.ThreadCoordinate]*tardigrade.Runtime
+	opening map[tardigrade.ThreadCoordinate]*sync.Mutex
+	watches map[tardigrade.ThreadCoordinate]map[string]watch
+	subs    map[tardigrade.ThreadCoordinate]map[chan tardigrade.Update]struct{}
+	active  map[tardigrade.ThreadCoordinate]bool
 	closed  bool
 }
 
 type watch struct {
-	parent core.ThreadCoordinate
-	ref    core.Ref
+	parent tardigrade.ThreadCoordinate
+	ref    tardigrade.Ref
 	call   delegation
 }
 
 type delegation struct {
-	Parent string                `json:"parent"`
-	Child  core.ThreadCoordinate `json:"child"`
-	Method string                `json:"method"`
-	Call   string                `json:"call"`
+	Parent string                      `json:"parent"`
+	Child  tardigrade.ThreadCoordinate `json:"child"`
+	Method string                      `json:"method"`
+	Call   string                      `json:"call"`
 }
 
 // New opens a host and resumes every thread recorded with unfinished work.
@@ -78,10 +75,10 @@ func New(opts Options) (*Host, error) {
 		opts.StreamBuffer = DefaultStreamBuffer
 	}
 	if opts.Clock == nil {
-		opts.Clock = core.SystemClock
+		opts.Clock = tardigrade.SystemClock
 	}
-	h := &Host{opts: opts, threads: map[core.ThreadCoordinate]*core.Runtime{}, opening: map[core.ThreadCoordinate]*sync.Mutex{},
-		watches: map[core.ThreadCoordinate]map[string]watch{}, subs: map[core.ThreadCoordinate]map[chan core.Update]struct{}{}, active: map[core.ThreadCoordinate]bool{}}
+	h := &Host{opts: opts, threads: map[tardigrade.ThreadCoordinate]*tardigrade.Runtime{}, opening: map[tardigrade.ThreadCoordinate]*sync.Mutex{},
+		watches: map[tardigrade.ThreadCoordinate]map[string]watch{}, subs: map[tardigrade.ThreadCoordinate]map[chan tardigrade.Update]struct{}{}, active: map[tardigrade.ThreadCoordinate]bool{}}
 	threads, err := opts.Store.Threads(opts.Actor.Name(), "")
 	if err != nil {
 		return nil, err
@@ -98,7 +95,7 @@ func New(opts Options) (*Host, error) {
 }
 
 // Actor returns the hosted actor.
-func (h *Host) Actor() *core.Actor { return h.opts.Actor }
+func (h *Host) Actor() *tardigrade.Actor { return h.opts.Actor }
 
 func randomName() string {
 	var b [6]byte
@@ -111,17 +108,17 @@ func validName(name string) bool {
 }
 
 // CreateThread allocates a thread. An existing name returns the existing thread, so a retried creation is absorbed; an empty name is generated. A nonempty parent creates a child of that thread.
-func (h *Host) CreateThread(instance, name, parent string) (core.ThreadCoordinate, error) {
+func (h *Host) CreateThread(instance, name, parent string) (tardigrade.ThreadCoordinate, error) {
 	if name == "" {
 		name = randomName()
 	}
 	if !validName(instance) || !validName(name) {
-		return core.ThreadCoordinate{}, &core.InvalidInputError{Err: errors.New("instance and thread names must be nonempty and contain no slash")}
+		return tardigrade.ThreadCoordinate{}, &tardigrade.InvalidInputError{Err: errors.New("instance and thread names must be nonempty and contain no slash")}
 	}
-	address := core.ThreadCoordinate{Actor: h.opts.Actor.Name(), Instance: instance, Thread: name}
-	info := core.ThreadInfo{Address: address, CreatedAt: h.opts.Clock.Now().UnixMilli()}
+	address := tardigrade.ThreadCoordinate{Actor: h.opts.Actor.Name(), Instance: instance, Thread: name}
+	info := tardigrade.ThreadInfo{Address: address, CreatedAt: h.opts.Clock.Now().UnixMilli()}
 	if parent != "" {
-		parentInfo, err := h.opts.Store.Thread(core.ThreadCoordinate{Actor: address.Actor, Instance: instance, Thread: parent})
+		parentInfo, err := h.opts.Store.Thread(tardigrade.ThreadCoordinate{Actor: address.Actor, Instance: instance, Thread: parent})
 		if err != nil {
 			return address, err
 		}
@@ -129,13 +126,13 @@ func (h *Host) CreateThread(instance, name, parent string) (core.ThreadCoordinat
 			return address, fmt.Errorf("%w: %s", ErrUnknownThread, parent)
 		}
 		if parentInfo.Depth+1 > h.opts.MaxDepth {
-			return address, &core.InvalidInputError{Err: fmt.Errorf("child depth limit %d reached", h.opts.MaxDepth)}
+			return address, &tardigrade.InvalidInputError{Err: fmt.Errorf("child depth limit %d reached", h.opts.MaxDepth)}
 		}
 		info.Parent, info.Depth = parent, parentInfo.Depth+1
 	}
 	if existing, err := h.opts.Store.Thread(address); err != nil || existing != nil {
 		if existing != nil && existing.Parent != info.Parent {
-			return address, &core.InvalidInputError{Err: fmt.Errorf("thread %s exists with another parent", name)}
+			return address, &tardigrade.InvalidInputError{Err: fmt.Errorf("thread %s exists with another parent", name)}
 		}
 		return address, err
 	}
@@ -147,20 +144,20 @@ func (h *Host) CreateThread(instance, name, parent string) (core.ThreadCoordinat
 }
 
 // Thread returns the runtime of an existing thread, opening it when needed.
-func (h *Host) Thread(instance, thread string) (*core.Runtime, error) {
-	return h.runtime(core.ThreadCoordinate{Actor: h.opts.Actor.Name(), Instance: instance, Thread: thread})
+func (h *Host) Thread(instance, thread string) (*tardigrade.Runtime, error) {
+	return h.runtime(tardigrade.ThreadCoordinate{Actor: h.opts.Actor.Name(), Instance: instance, Thread: thread})
 }
 
 // Threads lists an instance's threads; an empty instance lists every instance.
-func (h *Host) Threads(instance string) ([]core.ThreadInfo, error) {
+func (h *Host) Threads(instance string) ([]tardigrade.ThreadInfo, error) {
 	return h.opts.Store.Threads(h.opts.Actor.Name(), instance)
 }
 
-func (h *Host) runtime(address core.ThreadCoordinate) (*core.Runtime, error) {
+func (h *Host) runtime(address tardigrade.ThreadCoordinate) (*tardigrade.Runtime, error) {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		return nil, core.ErrClosed
+		return nil, tardigrade.ErrClosed
 	}
 	if rt := h.threads[address]; rt != nil {
 		h.mu.Unlock()
@@ -187,21 +184,21 @@ func (h *Host) runtime(address core.ThreadCoordinate) (*core.Runtime, error) {
 	if info == nil {
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnknownThread, address.Instance, address.Thread)
 	}
-	created := &core.ThreadCreated{Address: address, Depth: info.Depth}
+	created := &tardigrade.ThreadCreated{Address: address, Depth: info.Depth}
 	if info.Parent != "" {
-		created.Parent = &core.ThreadCoordinate{Actor: address.Actor, Instance: address.Instance, Thread: info.Parent}
+		created.Parent = &tardigrade.ThreadCoordinate{Actor: address.Actor, Instance: address.Instance, Thread: info.Parent}
 	}
-	var acts []core.Implementation
-	if h.opts.Acts != nil {
-		acts = h.opts.Acts(h, address)
+	var handlers []tardigrade.Handler
+	if h.opts.Handlers != nil {
+		handlers = h.opts.Handlers(h, address)
 	}
 	h.mu.Lock()
 	h.active[address] = info.Active
 	h.mu.Unlock()
-	rt, err := core.Open(core.Options{
-		Actor: h.opts.Actor, Journal: h.opts.Store.Journal(address), Address: address, Acts: acts,
+	rt, err := tardigrade.Open(tardigrade.Options{
+		Actor: h.opts.Actor, Journal: h.opts.Store.Journal(address), Address: address, Handlers: handlers,
 		Policy: h.opts.Policy, Clock: h.opts.Clock, Promises: h, Publish: h.publish, Created: created,
-		OnCommit: func(_ int64, _ []core.Record, active int) { h.committed(address, active > 0) },
+		OnCommit: func(_ int64, _ []tardigrade.Record, active int) { h.committed(address, active > 0) },
 	})
 	if err != nil {
 		return nil, err
@@ -210,7 +207,7 @@ func (h *Host) runtime(address core.ThreadCoordinate) (*core.Runtime, error) {
 	defer h.mu.Unlock()
 	if h.closed {
 		go rt.Close()
-		return nil, core.ErrClosed
+		return nil, tardigrade.ErrClosed
 	}
 	h.threads[address] = rt
 	if len(h.watches[address]) > 0 {
@@ -220,7 +217,7 @@ func (h *Host) runtime(address core.ThreadCoordinate) (*core.Runtime, error) {
 }
 
 // committed runs under the thread's runtime lock after each commit.
-func (h *Host) committed(address core.ThreadCoordinate, active bool) {
+func (h *Host) committed(address tardigrade.ThreadCoordinate, active bool) {
 	h.mu.Lock()
 	changed := h.active[address] != active
 	h.active[address] = active
@@ -235,29 +232,29 @@ func (h *Host) committed(address core.ThreadCoordinate, active bool) {
 }
 
 // Delegate calls a method on a child thread of parent and returns the handle of its eventual result. The child name and call ID derive from ref, so a delegation repeated after a crash reaches the same call.
-func (h *Host) Delegate(parent core.ThreadCoordinate, ref core.Ref, method string, input any) (core.Handle, error) {
+func (h *Host) Delegate(parent tardigrade.ThreadCoordinate, ref tardigrade.Ref, method string, input any) (tardigrade.Handle, error) {
 	data, err := json.Marshal(input)
 	if err != nil {
-		return core.Handle{}, err
+		return tardigrade.Handle{}, err
 	}
 	child, err := h.CreateThread(parent.Instance, fmt.Sprintf("%s.%d", parent.Thread, ref.Seq), parent.Thread)
 	if err != nil {
-		return core.Handle{}, err
+		return tardigrade.Handle{}, err
 	}
 	rt, err := h.runtime(child)
 	if err != nil {
-		return core.Handle{}, err
+		return tardigrade.Handle{}, err
 	}
 	call := ref.Key()
-	if err := rt.Invoke(method, call, core.Sender{Kind: ThreadExecutor, ID: parent.Thread}, data); err != nil {
-		return core.Handle{}, err
+	if err := rt.Invoke(method, call, tardigrade.Sender{Kind: string(tardigrade.ExecutorThread), ID: parent.Thread}, data); err != nil {
+		return tardigrade.Handle{}, err
 	}
 	id, _ := json.Marshal(delegation{Parent: parent.Thread, Child: child, Method: method, Call: call})
-	return core.Handle{Executor: ThreadExecutor, ID: string(id)}, nil
+	return tardigrade.Handle{Executor: tardigrade.ExecutorThread, ID: string(id)}, nil
 }
 
 // CancelDelegation asks a delegated call to stop; calls whose method is not cancellable are left running.
-func (h *Host) CancelDelegation(handle core.Handle, reason string) error {
+func (h *Host) CancelDelegation(handle tardigrade.Handle, reason string) error {
 	var d delegation
 	if err := json.Unmarshal([]byte(handle.ID), &d); err != nil {
 		return err
@@ -266,16 +263,16 @@ func (h *Host) CancelDelegation(handle core.Handle, reason string) error {
 	if err != nil {
 		return err
 	}
-	err = rt.CancelCall(d.Method, d.Call, reason, core.Sender{Kind: ThreadExecutor, ID: d.Parent})
-	if errors.Is(err, core.ErrNotCancellable) {
+	err = rt.CancelCall(d.Method, d.Call, reason, tardigrade.Sender{Kind: string(tardigrade.ExecutorThread), ID: d.Parent})
+	if errors.Is(err, tardigrade.ErrNotCancellable) {
 		return nil
 	}
 	return err
 }
 
-// Watch implements core.Promises for the thread executor.
-func (h *Host) Watch(w core.PromiseWatch) error {
-	if w.Handle.Executor != ThreadExecutor {
+// Watch implements tardigrade.Promises for the thread executor.
+func (h *Host) Watch(w tardigrade.PromiseWatch) error {
+	if w.Handle.Executor != tardigrade.ExecutorThread {
 		return fmt.Errorf("host: no executor %q", w.Handle.Executor)
 	}
 	var d delegation
@@ -295,8 +292,8 @@ func (h *Host) Watch(w core.PromiseWatch) error {
 	return nil
 }
 
-// Cancel implements core.Promises by dropping a watch.
-func (h *Host) Cancel(w core.PromiseWatch) error {
+// Cancel implements tardigrade.Promises by dropping a watch.
+func (h *Host) Cancel(w tardigrade.PromiseWatch) error {
 	var d delegation
 	if err := json.Unmarshal([]byte(w.Handle.ID), &d); err != nil {
 		return err
@@ -307,8 +304,8 @@ func (h *Host) Cancel(w core.PromiseWatch) error {
 	return nil
 }
 
-// check settles parent promises whose child calls finished.
-func (h *Host) check(child core.ThreadCoordinate) {
+// check finishes parent promises whose child calls finished.
+func (h *Host) check(child tardigrade.ThreadCoordinate) {
 	h.mu.Lock()
 	rt := h.threads[child]
 	pending := make([]watch, 0, len(h.watches[child]))
@@ -321,7 +318,7 @@ func (h *Host) check(child core.ThreadCoordinate) {
 	}
 	for _, w := range pending {
 		state, err := rt.Call(w.call.Method, w.call.Call)
-		if err != nil || state.Status == core.StatusPending {
+		if err != nil || state.Status == tardigrade.StatusPending {
 			continue
 		}
 		parent, err := h.runtime(w.parent)
@@ -329,16 +326,16 @@ func (h *Host) check(child core.ThreadCoordinate) {
 			continue
 		}
 		var value json.RawMessage
-		var reason *core.Reason
+		var failure *tardigrade.Failure
 		switch state.Status {
-		case core.StatusCompleted:
+		case tardigrade.StatusCompleted:
 			value = state.Output
-		case core.StatusCancelled:
-			reason = &core.Reason{Kind: core.ReasonCancelled, Message: state.Reason}
+		case tardigrade.StatusCancelled:
+			failure = &tardigrade.Failure{Kind: tardigrade.FailureCancelled, Message: state.Reason}
 		default:
-			reason = &core.Reason{Kind: core.ReasonFailed, Message: state.Error}
+			failure = &tardigrade.Failure{Kind: tardigrade.FailureError, Message: state.Error}
 		}
-		if err := parent.Settle(w.ref, value, reason); err == nil {
+		if err := parent.Finish(w.ref, value, failure); err == nil {
 			h.mu.Lock()
 			delete(h.watches[child], w.ref.Key())
 			h.mu.Unlock()
@@ -346,7 +343,7 @@ func (h *Host) check(child core.ThreadCoordinate) {
 	}
 }
 
-func (h *Host) publish(update core.Update) {
+func (h *Host) publish(update tardigrade.Update) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.subs[update.Address] {
@@ -358,11 +355,11 @@ func (h *Host) publish(update core.Update) {
 }
 
 // Subscribe receives a thread's execution updates until stop is called. Updates beyond Options.StreamBuffer unread are dropped.
-func (h *Host) Subscribe(address core.ThreadCoordinate) (updates <-chan core.Update, stop func()) {
-	ch := make(chan core.Update, h.opts.StreamBuffer)
+func (h *Host) Subscribe(address tardigrade.ThreadCoordinate) (updates <-chan tardigrade.Update, stop func()) {
+	ch := make(chan tardigrade.Update, h.opts.StreamBuffer)
 	h.mu.Lock()
 	if h.subs[address] == nil {
-		h.subs[address] = map[chan core.Update]struct{}{}
+		h.subs[address] = map[chan tardigrade.Update]struct{}{}
 	}
 	h.subs[address][ch] = struct{}{}
 	h.mu.Unlock()
@@ -385,15 +382,13 @@ func (h *Host) Close() error {
 	}
 	h.closed = true
 	threads := h.threads
-	h.threads = map[core.ThreadCoordinate]*core.Runtime{}
+	h.threads = map[tardigrade.ThreadCoordinate]*tardigrade.Runtime{}
 	h.mu.Unlock()
 	var group sync.WaitGroup
 	for _, rt := range threads {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			_ = rt.Close()
-		}()
+		})
 	}
 	group.Wait()
 	return nil
@@ -404,7 +399,7 @@ func (h *Host) WaitIdle(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		h.mu.Lock()
-		threads := make([]*core.Runtime, 0, len(h.threads))
+		threads := make([]*tardigrade.Runtime, 0, len(h.threads))
 		for _, rt := range h.threads {
 			threads = append(threads, rt)
 		}

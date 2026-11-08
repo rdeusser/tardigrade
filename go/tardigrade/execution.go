@@ -1,4 +1,4 @@
-package core
+package tardigrade
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/rdeusser/tardigrade/go/reactive"
 )
 
-// Execution is the capability set an act implementation receives for one accepted invocation.
+// Execution is what an act handler receives for one accepted invocation.
 type Execution struct {
 	rt      *Runtime
 	ref     Ref
@@ -163,7 +163,7 @@ func Retry[T any](x *Execution, policy RetryPolicy, op func(ctx context.Context)
 			return value, nil
 		}
 		if timedOut {
-			err = Reason{Kind: ReasonAttemptTimeout, Message: fmt.Sprintf("attempt timed out after %s", timeout)}
+			err = Failure{Kind: FailureAttemptTimeout, Message: fmt.Sprintf("attempt timed out after %s", timeout)}
 		}
 		if x.ctx.Err() != nil || policy.Decide == nil {
 			return zero, err

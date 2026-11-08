@@ -20,7 +20,7 @@ type call struct {
 	baseURL        string
 	key            string
 	provider       string
-	protocol       string
+	protocol       Protocol
 	options        map[string]json.RawMessage
 	maxTokensField string
 	firstChunk     time.Duration
@@ -127,9 +127,9 @@ func (c call) anthropic(ctx context.Context, request Request, onDelta func(Delta
 	}
 	for _, m := range request.Messages {
 		switch m.Role {
-		case "user":
+		case RoleUser:
 			push("user", anthropicParts(m)...)
-		case "assistant":
+		case RoleAssistant:
 			if m.Continuation != nil && m.Continuation.Provider == c.provider && m.Continuation.Protocol == c.protocol && m.Continuation.Model == request.Model.ModelID {
 				var blocks []map[string]any
 				if err := json.Unmarshal(m.Continuation.Payload, &blocks); err == nil {
@@ -145,7 +145,7 @@ func (c call) anthropic(ctx context.Context, request Request, onDelta func(Delta
 				blocks = append(blocks, map[string]any{"type": "tool_use", "id": call.ID, "name": call.Name, "input": rawOrEmpty(call.Input)})
 			}
 			push("assistant", blocks...)
-		case "tool":
+		case RoleTool:
 			result := map[string]any{"type": "tool_result", "tool_use_id": m.ToolCallID, "is_error": m.Error}
 			if len(m.Content) > 0 {
 				result["content"] = anySlice(anthropicParts(m))
@@ -225,10 +225,10 @@ func (c call) anthropic(ctx context.Context, request Request, onDelta func(Delta
 			switch event.Delta.Type {
 			case "text_delta":
 				b.Text += event.Delta.Text
-				emit(onDelta, "text", event.Delta.Text)
+				emit(onDelta, DeltaText, event.Delta.Text)
 			case "thinking_delta":
 				b.Thinking += event.Delta.Thinking
-				emit(onDelta, "reasoning", event.Delta.Thinking)
+				emit(onDelta, DeltaReasoning, event.Delta.Thinking)
 			case "signature_delta":
 				b.Signature += event.Delta.Signature
 			case "input_json_delta":
@@ -245,7 +245,7 @@ func (c call) anthropic(ctx context.Context, request Request, onDelta func(Delta
 				}
 			}
 		case "message_delta":
-			reply.FinishReason = map[string]string{"max_tokens": FinishLength, "tool_use": FinishToolCalls}[event.Delta.StopReason]
+			reply.FinishReason = map[string]FinishReason{"max_tokens": FinishLength, "tool_use": FinishToolCalls}[event.Delta.StopReason]
 			if event.Usage.OutputTokens > 0 {
 				reply.Usage.Output = event.Usage.OutputTokens
 			}
@@ -309,13 +309,13 @@ func anthropicParts(m Message) []map[string]any {
 	var blocks []map[string]any
 	for _, p := range m.Content {
 		switch {
-		case p.Type == "text" && p.Text != "":
+		case p.Type == PartText && p.Text != "":
 			blocks = append(blocks, map[string]any{"type": "text", "text": p.Text})
-		case p.Type == "file" && strings.HasPrefix(p.MediaType, "image/"):
+		case p.IsImage():
 			blocks = append(blocks, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": p.MediaType, "data": encodeData(p)}})
-		case p.Type == "file" && p.MediaType == "application/pdf":
+		case p.Type == PartFile && p.MediaType == "application/pdf":
 			blocks = append(blocks, map[string]any{"type": "document", "source": map[string]any{"type": "base64", "media_type": p.MediaType, "data": encodeData(p)}})
-		case p.Type == "file":
+		case p.Type == PartFile:
 			blocks = append(blocks, map[string]any{"type": "text", "text": fmt.Sprintf("[file %s (%s) omitted]", p.Filename, p.MediaType)})
 		}
 	}
@@ -330,9 +330,9 @@ func (c call) openai(ctx context.Context, request Request, onDelta func(Delta)) 
 	}
 	for _, m := range request.Messages {
 		switch m.Role {
-		case "user":
+		case RoleUser:
 			messages = append(messages, map[string]any{"role": "user", "content": openaiContent(m)})
-		case "assistant":
+		case RoleAssistant:
 			message := map[string]any{"role": "assistant", "content": m.Text}
 			if len(m.ToolCalls) > 0 {
 				calls := make([]map[string]any, len(m.ToolCalls))
@@ -342,7 +342,7 @@ func (c call) openai(ctx context.Context, request Request, onDelta func(Delta)) 
 				message["tool_calls"] = calls
 			}
 			messages = append(messages, message)
-		case "tool":
+		case RoleTool:
 			text := m.Text
 			if text == "" {
 				text = TextOf(m.Content, "\n")
@@ -418,11 +418,11 @@ func (c call) openai(ctx context.Context, request Request, onDelta func(Delta)) 
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
 				reply.Text += choice.Delta.Content
-				emit(onDelta, "text", choice.Delta.Content)
+				emit(onDelta, DeltaText, choice.Delta.Content)
 			}
 			if reasoning := choice.Delta.Reasoning + choice.Delta.ReasoningContent; reasoning != "" {
 				reply.Reasoning += reasoning
-				emit(onDelta, "reasoning", reasoning)
+				emit(onDelta, DeltaReasoning, reasoning)
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				for len(calls) <= tc.Index {
@@ -474,11 +474,11 @@ func openaiContent(m Message) any {
 	var parts []map[string]any
 	for _, p := range m.Content {
 		switch {
-		case p.Type == "text":
+		case p.Type == PartText:
 			parts = append(parts, map[string]any{"type": "text", "text": p.Text})
-		case p.Type == "file" && strings.HasPrefix(p.MediaType, "image/"):
+		case p.IsImage():
 			parts = append(parts, imagePart(p))
-		case p.Type == "file":
+		case p.Type == PartFile:
 			parts = append(parts, map[string]any{"type": "text", "text": fmt.Sprintf("[file %s (%s) omitted]", p.Filename, p.MediaType)})
 		}
 	}
@@ -492,14 +492,14 @@ func imagePart(p Part) map[string]any {
 func imageParts(content []Part) []map[string]any {
 	var images []map[string]any
 	for _, p := range content {
-		if p.Type == "file" && strings.HasPrefix(p.MediaType, "image/") {
+		if p.IsImage() {
 			images = append(images, imagePart(p))
 		}
 	}
 	return images
 }
 
-func emit(onDelta func(Delta), kind, text string) {
+func emit(onDelta func(Delta), kind DeltaType, text string) {
 	if onDelta != nil && text != "" {
 		onDelta(Delta{Type: kind, Text: text})
 	}

@@ -10,8 +10,8 @@ import (
 	"strconv"
 
 	"github.com/rdeusser/tardigrade/go/api"
-	"github.com/rdeusser/tardigrade/go/core"
 	"github.com/rdeusser/tardigrade/go/schema"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 // DefaultBodyBytes bounds request bodies the handler reads.
@@ -24,7 +24,7 @@ type HTTPOptions struct {
 	// BodyBytes bounds request bodies; zero uses DefaultBodyBytes.
 	BodyBytes int64
 	// Sender identifies HTTP callers in message metadata; the zero value uses {external, http}.
-	Sender core.Sender
+	Sender tardigrade.Sender
 }
 
 // Handler serves the method API: thread allocation, method calls and their state, cancellation, the journal, and SSE streams of records and execution updates.
@@ -32,8 +32,8 @@ func (h *Host) Handler(opts HTTPOptions) http.Handler {
 	if opts.BodyBytes == 0 {
 		opts.BodyBytes = DefaultBodyBytes
 	}
-	if opts.Sender == (core.Sender{}) {
-		opts.Sender = core.Sender{Kind: "external", ID: "http"}
+	if opts.Sender == (tardigrade.Sender{}) {
+		opts.Sender = tardigrade.Sender{Kind: "external", ID: "http"}
 	}
 	mux := http.NewServeMux()
 	route := func(pattern string, handle func(w http.ResponseWriter, r *http.Request) error) {
@@ -63,7 +63,7 @@ func (h *Host) Handler(opts HTTPOptions) http.Handler {
 			return err
 		}
 		if threads == nil {
-			threads = []core.ThreadInfo{}
+			threads = []tardigrade.ThreadInfo{}
 		}
 		return writeJSON(w, http.StatusOK, threads)
 	})
@@ -81,7 +81,7 @@ func (h *Host) Handler(opts HTTPOptions) http.Handler {
 		}
 		return writeJSON(w, http.StatusOK, address)
 	})
-	thread := func(r *http.Request) (*core.Runtime, error) {
+	thread := func(r *http.Request) (*tardigrade.Runtime, error) {
 		return h.Thread(r.PathValue("instance"), r.PathValue("thread"))
 	}
 	route("POST /v1/actors/{instance}/threads/{thread}/methods/{method}", func(w http.ResponseWriter, r *http.Request) error {
@@ -221,14 +221,14 @@ func (h *Host) Handler(opts HTTPOptions) http.Handler {
 	return mux
 }
 
-func rows(rt *core.Runtime, after int64) ([]api.Row, error) {
+func rows(rt *tardigrade.Runtime, after int64) ([]api.Row, error) {
 	records, err := rt.Records(after, rt.Length())
 	if err != nil {
 		return nil, err
 	}
 	out := make([]api.Row, 0, len(records))
 	for i, record := range records {
-		event, err := core.EncodeEvent(record.Event)
+		event, err := tardigrade.EncodeEvent(record.Event)
 		if err != nil {
 			return nil, err
 		}
@@ -278,8 +278,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) error {
 
 func writeError(w http.ResponseWriter, err error) {
 	var declared *api.Error
-	var invalid *core.InvalidInputError
-	var stopped *core.StoppedError
+	var invalid *tardigrade.InvalidInputError
+	var stopped *tardigrade.StoppedError
 	switch {
 	case errors.As(err, &declared):
 	case errors.As(err, &invalid):
@@ -288,13 +288,13 @@ func writeError(w http.ResponseWriter, err error) {
 		declared = &api.Error{Status: http.StatusConflict, Code: "actor_stopped", Message: stopped.Error()}
 	case errors.Is(err, ErrUnknownThread):
 		declared = &api.Error{Status: http.StatusNotFound, Code: "thread_not_found", Message: err.Error()}
-	case errors.Is(err, core.ErrUnknownMethod):
+	case errors.Is(err, tardigrade.ErrUnknownMethod):
 		declared = &api.Error{Status: http.StatusNotFound, Code: "method_not_found", Message: err.Error()}
-	case errors.Is(err, core.ErrUnknownCall):
+	case errors.Is(err, tardigrade.ErrUnknownCall):
 		declared = &api.Error{Status: http.StatusNotFound, Code: "call_not_found", Message: err.Error()}
-	case errors.Is(err, core.ErrNotCancellable):
+	case errors.Is(err, tardigrade.ErrNotCancellable):
 		declared = &api.Error{Status: http.StatusBadRequest, Code: "cancellation_unsupported", Message: err.Error()}
-	case errors.Is(err, core.ErrMessageConflict):
+	case errors.Is(err, tardigrade.ErrMessageConflict):
 		declared = &api.Error{Status: http.StatusConflict, Code: "message_conflict", Message: err.Error()}
 	default:
 		log.Printf("tardigrade: request failed: %v", err)

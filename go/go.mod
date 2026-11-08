@@ -1,6 +1,6 @@
 module github.com/rdeusser/tardigrade/go
 
-go 1.24.7
+go 1.27
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

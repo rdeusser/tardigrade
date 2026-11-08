@@ -1,4 +1,4 @@
-package core
+package tardigrade
 
 import (
 	"bytes"
@@ -74,7 +74,7 @@ func (systemClock) AfterFunc(d time.Duration, f func()) func() bool {
 // SystemClock is the wall clock.
 var SystemClock Clock = systemClock{}
 
-// PromiseWatch asks a host to settle deferred work held by an external executor.
+// PromiseWatch asks a host to finish deferred work held by an external executor.
 type PromiseWatch struct {
 	Address    ThreadCoordinate
 	Ref        Ref
@@ -82,7 +82,7 @@ type PromiseWatch struct {
 	DeadlineAt *int64
 }
 
-// Promises settles deferred work for executors other than "local" and "clock" by calling Runtime.Settle.
+// Promises finishes deferred work for executors other than ExecutorLocal and ExecutorClock by calling Runtime.Finish.
 type Promises interface {
 	Watch(w PromiseWatch) error
 	// Cancel stops observing; executor cleanup belongs to the act's cancellation handler.
@@ -103,11 +103,11 @@ type Options struct {
 	Actor   *Actor
 	Journal Journal
 	Address ThreadCoordinate
-	// Acts implement every act the actor can propose.
-	Acts   []Implementation
-	Policy Policy
-	Clock  Clock
-	// Promises settles handles of external executors; nil rejects them.
+	// Handlers run every act the actor can propose.
+	Handlers []Handler
+	Policy   Policy
+	Clock    Clock
+	// Promises finishes handles of external executors; when nil, their work fails.
 	Promises Promises
 	// Publish receives execution updates.
 	Publish func(Update)
@@ -124,7 +124,7 @@ var (
 	ErrUnknownMethod   = errors.New("unknown method")
 	ErrUnknownCall     = errors.New("unknown method call")
 	ErrNotCancellable  = errors.New("method does not support cancellation")
-	ErrPromiseNotReady = errors.New("promise settlement requires a recorded deferral")
+	ErrPromiseNotReady = errors.New("finishing a promise requires a recorded deferral")
 )
 
 // InvalidInputError rejects input that violates a method or event contract before it is journaled.
@@ -144,9 +144,9 @@ type operation struct {
 	request      StoredRequest
 	input        json.RawMessage
 	proposal     *actProposal
-	settled      *EffectSettled
+	finished     *EffectFinished
 	died         *EffectDied
-	promise      *PromiseSettled
+	promise      *PromiseFinished
 	retry        *RetryScheduled
 	cancel       *EffectCancelled
 	cleanup      Event
@@ -154,8 +154,8 @@ type operation struct {
 }
 
 func (op *operation) deferred() *PromiseRecord {
-	if op.settled != nil && op.settled.Result != nil {
-		return op.settled.Result.Promise
+	if op.finished != nil && op.finished.Result != nil {
+		return op.finished.Result.Promise
 	}
 	return nil
 }
@@ -164,12 +164,12 @@ func (op *operation) executionDone() bool {
 	if op.died != nil || op.promise != nil {
 		return true
 	}
-	return op.settled != nil && (op.settled.Reason != nil || op.settled.Result.Promise == nil)
+	return op.finished != nil && (op.finished.Err != nil || op.finished.Result.Promise == nil)
 }
 
 func (op *operation) cleanupSucceeded() bool {
-	settled, ok := op.cleanup.(CancellationSettled)
-	return ok && settled.Failure == ""
+	finished, ok := op.cleanup.(CleanupFinished)
+	return ok && finished.Error == ""
 }
 
 func (op *operation) complete() bool {
@@ -190,11 +190,11 @@ type task struct {
 
 // Runtime runs one thread of an actor: it replays the journal, commits proposals, and executes accepted work. Methods are safe for concurrent use.
 type Runtime struct {
-	opts    Options
-	policy  Policy
-	clock   Clock
-	impls   map[string]Implementation
-	address ThreadCoordinate
+	opts     Options
+	policy   Policy
+	clock    Clock
+	handlers map[string]Handler
+	address  ThreadCoordinate
 
 	mu        sync.Mutex
 	registry  *reactive.Registry
@@ -220,11 +220,11 @@ type Runtime struct {
 // Open replays a journal and resumes unfinished work.
 func Open(opts Options) (*Runtime, error) {
 	if opts.Actor == nil || opts.Journal == nil {
-		return nil, errors.New("core: Open requires an actor and a journal")
+		return nil, errors.New("tardigrade: Open requires an actor and a journal")
 	}
 	rt := &Runtime{
 		opts: opts, policy: opts.Policy.resolved(), clock: opts.Clock, address: opts.Address,
-		impls: map[string]Implementation{}, registry: reactive.NewRegistry(), source: &journalSource{journal: opts.Journal},
+		handlers: map[string]Handler{}, registry: reactive.NewRegistry(), source: &journalSource{journal: opts.Journal},
 		ops: map[string]*operation{}, tasks: map[string]*task{}, timers: map[string]func() bool{}, watched: map[string]bool{}, changed: make(chan struct{}),
 	}
 	if rt.clock == nil {
@@ -233,11 +233,11 @@ func Open(opts Options) (*Runtime, error) {
 	if rt.address.Actor == "" {
 		rt.address.Actor = opts.Actor.name
 	}
-	for _, impl := range opts.Acts {
-		if _, ok := rt.impls[impl.act]; ok {
-			return nil, fmt.Errorf("core: duplicate implementation for act %s", impl.act)
+	for _, handler := range opts.Handlers {
+		if _, ok := rt.handlers[handler.act]; ok {
+			return nil, fmt.Errorf("tardigrade: duplicate handler for act %s", handler.act)
 		}
-		rt.impls[impl.act] = impl
+		rt.handlers[handler.act] = handler
 	}
 	rt.ctx, rt.stop = context.WithCancel(context.Background())
 	if err := rt.replay(); err != nil {
@@ -347,19 +347,19 @@ func (rt *Runtime) apply(e Event, position int64) (*operation, error) {
 		return nil, fmt.Errorf("%s refers to unknown work %s", e.EventType(), key)
 	}
 	switch v := e.(type) {
-	case EffectSettled:
-		if op.settled != nil {
-			return nil, fmt.Errorf("duplicate settlement of %s", key)
+	case EffectFinished:
+		if op.finished != nil {
+			return nil, fmt.Errorf("%s finished twice", key)
 		}
-		op.settled = &v
+		op.finished = &v
 	case EffectDied:
 		op.died = &v
 		if rt.defect == nil {
 			rt.defect = &v
 		}
-	case PromiseSettled:
+	case PromiseFinished:
 		if op.deferred() == nil {
-			return nil, fmt.Errorf("promise settlement of %s precedes its deferral", key)
+			return nil, fmt.Errorf("promise of %s finished before its deferral", key)
 		}
 		op.promise = &v
 	case RetryScheduled:
@@ -377,7 +377,7 @@ func (rt *Runtime) apply(e Event, position int64) (*operation, error) {
 		}
 	case EffectCancelled:
 		op.cancel = &v
-	case CancellationSettled, CancellationDied:
+	case CleanupFinished, CleanupDied:
 		if op.cancel == nil || op.cleanup != nil {
 			return nil, fmt.Errorf("cleanup outcome of %s requires one pending cancellation", key)
 		}
@@ -393,14 +393,14 @@ func followups(op *operation, e Event) []Event {
 		return nil
 	}
 	if cancelled, ok := e.(EffectCancelled); ok {
-		if p.onSettled == nil {
+		if p.onFinished == nil {
 			return nil
 		}
 		var handle *Handle
 		if promise := op.deferred(); promise != nil {
 			handle = &promise.Handle
 		}
-		return p.onSettled(nil, &Reason{Kind: ReasonCancelled, Message: cancelled.Reason}, handle, op.ref)
+		return p.onFinished(nil, &Failure{Kind: FailureCancelled, Message: cancelled.Reason}, handle, op.ref)
 	}
 	if op.cancel != nil {
 		return nil
@@ -410,21 +410,21 @@ func followups(op *operation, e Event) []Event {
 		if p.onRequested != nil {
 			return p.onRequested(op.ref)
 		}
-	case EffectSettled:
-		if v.Reason != nil {
-			if p.onSettled != nil {
-				return p.onSettled(nil, v.Reason, nil, op.ref)
+	case EffectFinished:
+		if v.Err != nil {
+			if p.onFinished != nil {
+				return p.onFinished(nil, v.Err, nil, op.ref)
 			}
 		} else if v.Result.Promise != nil {
 			if p.onDeferred != nil {
 				return p.onDeferred(v.Result.Promise.Handle, op.ref)
 			}
-		} else if p.onSettled != nil {
-			return p.onSettled(v.Result.Value, nil, nil, op.ref)
+		} else if p.onFinished != nil {
+			return p.onFinished(v.Result.Value, nil, nil, op.ref)
 		}
-	case PromiseSettled:
-		if p.onSettled != nil {
-			return p.onSettled(v.Value, v.Reason, &op.deferred().Handle, op.ref)
+	case PromiseFinished:
+		if p.onFinished != nil {
+			return p.onFinished(v.Value, v.Err, &op.deferred().Handle, op.ref)
 		}
 	}
 	return nil
@@ -573,10 +573,10 @@ func (rt *Runtime) prepare(entries []Record) (records []Record, changes Changes,
 	return records, changes, completed, nil
 }
 
-// bindIfNeeded binds recovered work before its callbacks run; work no current proposal matches settles without callback events.
+// bindIfNeeded binds recovered work before its callbacks run; work no current proposal matches finishes without callback events.
 func (rt *Runtime) bindIfNeeded(op *operation, e Event) error {
 	switch e.(type) {
-	case EffectSettled, PromiseSettled, EffectCancelled:
+	case EffectFinished, PromiseFinished, EffectCancelled:
 		if op.proposal == nil {
 			if err := rt.bind(op); err != nil {
 				rt.problems = append(rt.problems, err)
@@ -609,12 +609,12 @@ func (rt *Runtime) react(e Event) {
 			stop()
 			delete(rt.timers, k)
 		}
-	case EffectSettled:
+	case EffectFinished:
 		op := rt.ops[key]
 		if op != nil && v.Result != nil && v.Result.Promise != nil && op.cancel == nil {
 			rt.watch(op)
 		}
-	case PromiseSettled:
+	case PromiseFinished:
 		rt.stopTimer("deadline:" + key)
 		rt.stopTimer("clock:" + key)
 		if t := rt.tasks["fork:"+key]; t != nil {
@@ -776,10 +776,10 @@ func (rt *Runtime) recover() {
 				rt.report(fmt.Errorf("cleanup of %s ended without success; its input is retained", key))
 			}
 		case op.died != nil:
-		case op.settled == nil:
+		case op.finished == nil:
 			rt.dispatch(op, false)
 		case op.deferred() != nil && op.promise == nil && rt.defect == nil:
-			if op.deferred().Handle.Executor == "local" {
+			if op.deferred().Handle.Executor == ExecutorLocal {
 				rt.dispatch(op, true)
 			}
 			rt.watch(op)
@@ -787,7 +787,7 @@ func (rt *Runtime) recover() {
 	}
 }
 
-// watch schedules settlement of deferred work by its executor and expiry by its deadline.
+// watch schedules deferred work to finish through its executor or expire at its deadline.
 func (rt *Runtime) watch(op *operation) {
 	promise := op.deferred()
 	key := op.ref.Key()
@@ -795,32 +795,30 @@ func (rt *Runtime) watch(op *operation) {
 	if promise.DeadlineAt != nil {
 		deadline := *promise.DeadlineAt
 		rt.schedule("deadline:"+key, deadline, func() {
-			rt.settleLocked(ref, nil, &Reason{Kind: ReasonPromiseTimeout, Message: fmt.Sprintf("promise expired at %d", deadline)})
+			rt.finishPromise(ref, nil, &Failure{Kind: FailurePromiseTimeout, Message: fmt.Sprintf("promise expired at %d", deadline)})
 		})
 	}
 	switch promise.Handle.Executor {
-	case "local":
-	case "clock":
+	case ExecutorLocal:
+	case ExecutorClock:
 		value := promise.Handle.Value
 		if len(value) == 0 {
 			value = json.RawMessage("null")
 		}
-		rt.schedule("clock:"+key, promise.Handle.At, func() { rt.settleLocked(ref, value, nil) })
+		rt.schedule("clock:"+key, promise.Handle.At, func() { rt.finishPromise(ref, value, nil) })
 	default:
 		if rt.watched[key] {
 			return
 		}
 		rt.watched[key] = true
 		w := PromiseWatch{Address: rt.address, Ref: ref, Handle: promise.Handle, DeadlineAt: promise.DeadlineAt}
-		rt.group.Add(1)
-		go func() {
-			defer rt.group.Done()
+		rt.group.Go(func() {
 			if rt.opts.Promises == nil {
-				_ = rt.Settle(ref, nil, &Reason{Kind: ReasonFailed, Message: "no Promises service settles executor " + w.Handle.Executor})
+				_ = rt.Finish(ref, nil, &Failure{Kind: FailureError, Message: "no Promises service resolves executor " + string(w.Handle.Executor)})
 			} else if err := rt.opts.Promises.Watch(w); err != nil {
-				_ = rt.Settle(ref, nil, &Reason{Kind: ReasonFailed, Message: err.Error()})
+				_ = rt.Finish(ref, nil, &Failure{Kind: FailureError, Message: err.Error()})
 			}
-		}()
+		})
 	}
 }
 
@@ -838,24 +836,24 @@ func (rt *Runtime) schedule(key string, at int64, fire func()) {
 	})
 }
 
-// settleLocked commits a promise settlement if the work still awaits one; callers hold the lock.
-func (rt *Runtime) settleLocked(ref Ref, value json.RawMessage, reason *Reason) {
+// finishPromise records how deferred work finished if it still awaits that; callers hold the lock.
+func (rt *Runtime) finishPromise(ref Ref, value json.RawMessage, failure *Failure) {
 	op := rt.ops[ref.Key()]
 	if op == nil || op.cancel != nil || op.promise != nil || op.deferred() == nil {
 		return
 	}
-	if reason == nil && len(value) == 0 {
+	if failure == nil && len(value) == 0 {
 		value = json.RawMessage("null")
 	}
-	if err := rt.commit([]Record{{Event: PromiseSettled{Ref: ref, Value: value, Reason: reason}, RecordedAt: rt.now()}}); err != nil {
-		rt.report(fmt.Errorf("settle %s: %w", ref.Key(), err))
+	if err := rt.commit([]Record{{Event: PromiseFinished{Ref: ref, Value: value, Err: failure}, RecordedAt: rt.now()}}); err != nil {
+		rt.report(fmt.Errorf("finish %s: %w", ref.Key(), err))
 		return
 	}
 	rt.drive()
 }
 
-// Settle records the outcome of deferred work held by an external executor. Repeating an identical settlement is a no-op.
-func (rt *Runtime) Settle(ref Ref, value json.RawMessage, reason *Reason) error {
+// Finish records how deferred work held by an external executor finished: value on success, failure otherwise. Finishing work that already finished is a no-op.
+func (rt *Runtime) Finish(ref Ref, value json.RawMessage, failure *Failure) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.closed {
@@ -868,7 +866,7 @@ func (rt *Runtime) Settle(ref Ref, value json.RawMessage, reason *Reason) error 
 	if op.deferred() == nil {
 		return ErrPromiseNotReady
 	}
-	rt.settleLocked(ref, value, reason)
+	rt.finishPromise(ref, value, failure)
 	return nil
 }
 
@@ -908,7 +906,7 @@ func (rt *Runtime) dispatch(op *operation, recovering bool) {
 	if !ok {
 		return
 	}
-	impl, found := rt.impls[op.ref.Act]
+	handler, found := rt.handlers[op.ref.Act]
 	x := newExecution(rt, op, ctx)
 	input := op.input
 	go func() {
@@ -916,18 +914,18 @@ func (rt *Runtime) dispatch(op *operation, recovering bool) {
 		var err error
 		var diagnostic string
 		if !found {
-			diagnostic = "no implementation for act " + op.ref.Act
+			diagnostic = "no handler for act " + op.ref.Act
 		} else {
-			result, err, diagnostic = protect(func() (rawResult, error) { return impl.run(x, input) })
+			result, err, diagnostic = protect(func() (rawResult, error) { return handler.run(x, input) })
 		}
 		x.disarm()
 		if err != nil && errors.Is(context.Cause(x.ctx), errAttemptTimeout) {
-			err = Reason{Kind: ReasonAttemptTimeout, Message: fmt.Sprintf("attempt timed out after %s", x.timeout)}
+			err = Failure{Kind: FailureAttemptTimeout, Message: fmt.Sprintf("attempt timed out after %s", x.timeout)}
 		}
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
 		defer rt.endTask(key, t)
-		rt.finish(op.ref, result, err, diagnostic, recovering)
+		rt.conclude(op.ref, result, err, diagnostic, recovering)
 	}()
 }
 
@@ -941,7 +939,8 @@ func protect[T any](run func() (T, error)) (value T, err error, diagnostic strin
 	return value, err, ""
 }
 
-func (rt *Runtime) finish(ref Ref, result rawResult, err error, diagnostic string, recovering bool) {
+// conclude records how an execution ended.
+func (rt *Runtime) conclude(ref Ref, result rawResult, err error, diagnostic string, recovering bool) {
 	op := rt.ops[ref.Key()]
 	if rt.closed || op == nil {
 		return
@@ -955,36 +954,36 @@ func (rt *Runtime) finish(ref Ref, result rawResult, err error, diagnostic strin
 		return
 	}
 	if op.cancel != nil {
-		if err == nil && result.handle != nil && op.settled == nil {
-			_ = rt.commit([]Record{{Event: EffectSettled{Ref: ref, Result: &ExecutionResult{Promise: &PromiseRecord{Handle: *result.handle, DeadlineAt: rt.deadline(result)}}}, RecordedAt: rt.now()}})
+		if err == nil && result.handle != nil && op.finished == nil {
+			_ = rt.commit([]Record{{Event: EffectFinished{Ref: ref, Result: &ExecutionResult{Promise: &PromiseRecord{Handle: *result.handle, DeadlineAt: rt.deadline(result)}}}, RecordedAt: rt.now()}})
 		}
 		return
 	}
 	if recovering {
 		switch {
 		case err != nil:
-			rt.settleLocked(ref, nil, reasonOf(err))
+			rt.finishPromise(ref, nil, failureOf(err))
 		case result.fork != nil:
 			rt.startFork(op, result.fork)
 		case result.handle == nil:
-			rt.settleLocked(ref, result.value, nil)
+			rt.finishPromise(ref, result.value, nil)
 		}
 		return
 	}
-	if op.settled != nil {
+	if op.finished != nil {
 		return
 	}
-	settled := EffectSettled{Ref: ref}
+	finished := EffectFinished{Ref: ref}
 	switch {
 	case err != nil:
-		settled.Reason = reasonOf(err)
+		finished.Err = failureOf(err)
 	case result.handle != nil:
-		settled.Result = &ExecutionResult{Promise: &PromiseRecord{Handle: *result.handle, DeadlineAt: rt.deadline(result)}}
+		finished.Result = &ExecutionResult{Promise: &PromiseRecord{Handle: *result.handle, DeadlineAt: rt.deadline(result)}}
 	default:
-		settled.Result = &ExecutionResult{Value: result.value}
+		finished.Result = &ExecutionResult{Value: result.value}
 	}
-	if cerr := rt.commit([]Record{{Event: settled, RecordedAt: rt.now()}}); cerr != nil {
-		rt.report(fmt.Errorf("settle %s: %w", ref.Key(), cerr))
+	if cerr := rt.commit([]Record{{Event: finished, RecordedAt: rt.now()}}); cerr != nil {
+		rt.report(fmt.Errorf("finish %s: %w", ref.Key(), cerr))
 		return
 	}
 	if result.fork != nil && err == nil {
@@ -1002,23 +1001,21 @@ func (rt *Runtime) deadline(result rawResult) *int64 {
 		return nil
 	}
 	start := rt.now()
-	if result.handle.Executor == "clock" && result.handle.At > start {
+	if result.handle.Executor == ExecutorClock && result.handle.At > start {
 		start = result.handle.At
 	}
 	at := start + timeout.Milliseconds()
 	return &at
 }
 
-func reasonOf(err error) *Reason {
-	var reason Reason
-	if errors.As(err, &reason) {
-		return &reason
+func failureOf(err error) *Failure {
+	if failure, ok := errors.AsType[Failure](err); ok {
+		return &failure
 	}
-	var pointer *Reason
-	if errors.As(err, &pointer) && pointer != nil {
-		return pointer
+	if failure, ok := errors.AsType[*Failure](err); ok && failure != nil {
+		return failure
 	}
-	return &Reason{Kind: ReasonFailed, Message: err.Error()}
+	return &Failure{Kind: FailureError, Message: err.Error()}
 }
 
 func (rt *Runtime) startFork(op *operation, work func(context.Context) (json.RawMessage, error)) {
@@ -1044,9 +1041,9 @@ func (rt *Runtime) startFork(op *operation, work func(context.Context) (json.Raw
 				}
 			}
 		case err != nil:
-			rt.settleLocked(ref, nil, reasonOf(err))
+			rt.finishPromise(ref, nil, failureOf(err))
 		default:
-			rt.settleLocked(ref, value, nil)
+			rt.finishPromise(ref, value, nil)
 		}
 	}()
 }
@@ -1064,7 +1061,7 @@ func (rt *Runtime) startCleanup(op *operation) {
 		attempt, dueAt = op.cleanupRetry.Attempt, op.cleanupRetry.DueAt
 	}
 	executing := rt.tasks["exec:"+ref.Key()]
-	impl := rt.impls[ref.Act]
+	handler := rt.handlers[ref.Act]
 	go func() {
 		if executing != nil {
 			<-executing.done
@@ -1090,16 +1087,16 @@ func (rt *Runtime) startCleanup(op *operation) {
 			}
 			var err error
 			var diagnostic string
-			if impl.cancel != nil {
+			if handler.cancel != nil {
 				_, err, diagnostic = protect(func() (struct{}, error) {
-					return struct{}{}, impl.cancel(Cleanup{Context: ctx, Ref: ref, Reason: reason, Handle: handle}, input)
+					return struct{}{}, handler.cancel(Cleanup{Context: ctx, Ref: ref, Reason: reason, Handle: handle}, input)
 				})
 			}
 			switch {
 			case diagnostic != "":
-				outcome = CancellationDied{Ref: ref, Diagnostic: diagnostic}
+				outcome = CleanupDied{Ref: ref, Diagnostic: diagnostic}
 			case err == nil:
-				outcome = CancellationSettled{Ref: ref}
+				outcome = CleanupFinished{Ref: ref}
 			case ctx.Err() != nil:
 				outcome = nil
 			default:
@@ -1109,7 +1106,7 @@ func (rt *Runtime) startCleanup(op *operation) {
 				cerr := rt.commit([]Record{{Event: RetryScheduled{Ref: ref, Phase: "cancellation", Attempt: attempt, DueAt: dueAt, Reason: err.Error()}, RecordedAt: rt.now()}})
 				rt.mu.Unlock()
 				if cerr != nil {
-					outcome = CancellationSettled{Ref: ref, Failure: err.Error()}
+					outcome = CleanupFinished{Ref: ref, Error: err.Error()}
 				}
 				continue
 			}
@@ -1127,10 +1124,10 @@ func (rt *Runtime) startCleanup(op *operation) {
 			rt.report(err)
 			return
 		}
-		if settled, ok := outcome.(CancellationSettled); ok && settled.Failure != "" {
-			rt.report(fmt.Errorf("cleanup of %s failed: %s", ref.Key(), settled.Failure))
+		if finished, ok := outcome.(CleanupFinished); ok && finished.Error != "" {
+			rt.report(fmt.Errorf("cleanup of %s failed: %s", ref.Key(), finished.Error))
 		}
-		if died, ok := outcome.(CancellationDied); ok {
+		if died, ok := outcome.(CleanupDied); ok {
 			rt.report(fmt.Errorf("cleanup of %s died: %s", ref.Key(), died.Diagnostic))
 		}
 		rt.drive()

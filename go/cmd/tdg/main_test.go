@@ -73,7 +73,7 @@ func TestServeAndCallAgent(t *testing.T) {
 	if !strings.Contains(result, `"status": "completed"`) || !strings.Contains(result, `hello there`) {
 		t.Fatalf("call = %s", result)
 	}
-	if events := tdg("events", "t1"); !strings.Contains(events, "TurnSettled") {
+	if events := tdg("events", "t1"); !strings.Contains(events, "TurnFinished") {
 		t.Fatalf("events = %s", events)
 	}
 	cancel()

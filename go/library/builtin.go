@@ -19,7 +19,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/rdeusser/tardigrade/go/core"
+	"github.com/rdeusser/tardigrade/go/model"
+	"github.com/rdeusser/tardigrade/go/tardigrade"
 )
 
 // FilesystemPolicy bounds workspace commands and reads.
@@ -132,14 +133,14 @@ func (w LocalWorkspace) Read(path string, offset, limit int) (Content, error) {
 		if mediaType == "" {
 			mediaType = http.DetectContentType(data)
 		}
-		return Content{{Type: "file", MediaType: strings.Split(mediaType, ";")[0], Data: data, Filename: filepath.Base(full)}}, nil
+		return Content{{Type: model.PartFile, MediaType: strings.Split(mediaType, ";")[0], Data: data, Filename: filepath.Base(full)}}, nil
 	}
 	lines := strings.Split(string(data), "\n")
 	if offset < 1 {
 		offset = 1
 	}
 	if offset > len(lines) {
-		return Content{{Type: "text", Text: fmt.Sprintf("[offset %d is beyond the file's %d lines]", offset, len(lines))}}, nil
+		return Content{{Type: model.PartText, Text: fmt.Sprintf("[offset %d is beyond the file's %d lines]", offset, len(lines))}}, nil
 	}
 	end := len(lines)
 	if limit > 0 && offset-1+limit < end {
@@ -151,7 +152,7 @@ func (w LocalWorkspace) Read(path string, offset, limit int) (Content, error) {
 	} else if end < len(lines) {
 		text += fmt.Sprintf("\n[%d more lines; continue with offset %d]", len(lines)-end, end+1)
 	}
-	return Content{{Type: "text", Text: text}}, nil
+	return Content{{Type: model.PartText, Text: text}}, nil
 }
 
 func (w LocalWorkspace) Write(path, content string) error {
@@ -217,7 +218,7 @@ func Filesystem(w Workspace) Library {
 		}, Named("bash")),
 		Tool("read", "Read workspace text or file content. offset is a one-based starting line and limit the maximum line count. Binary files are returned whole.", func(_ Call, in read) (Content, error) {
 			return w.Read(in.Path, in.Offset, in.Limit)
-		}, Named("read"), Hints(Annotations{ReadOnlyHint: Bool(true), OpenWorldHint: Bool(false)})),
+		}, Named("read"), Hints(Annotations{ReadOnlyHint: new(true), OpenWorldHint: new(false)})),
 		Tool("write", "Create or overwrite a file in the workspace", func(_ Call, in write) (string, error) {
 			return "Wrote " + in.Path, w.Write(in.Path, in.Content)
 		}, Named("write")),
@@ -272,7 +273,7 @@ func Fetch(client *http.Client, maxBytes int64) Library {
 				body = body[:maxBytes]
 			}
 			return output{URL: response.Request.URL.String(), Status: response.StatusCode, OK: response.StatusCode < 300, Body: string(body), Truncated: truncated}, nil
-		}, Named("fetch_url"), Hints(Annotations{ReadOnlyHint: Bool(true), OpenWorldHint: Bool(true)})),
+		}, Named("fetch_url"), Hints(Annotations{ReadOnlyHint: new(true), OpenWorldHint: new(true)})),
 	)
 }
 
@@ -319,7 +320,7 @@ func Notes(maxChars int) Library {
 			start := min(max(in.Offset, 0), len(runes))
 			end := min(start+maxChars, len(runes))
 			return readOutput{Key: in.Key, Value: string(runes[start:end]), Offset: start, TotalChars: len(runes), Truncated: end < len(runes)}, nil
-		}, Named("read_text"), Hints(Annotations{ReadOnlyHint: Bool(true)})),
+		}, Named("read_text"), Hints(Annotations{ReadOnlyHint: new(true)})),
 		Tool("list", "List stored keys.", func(Call, struct{}) ([]string, error) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -329,14 +330,14 @@ func Notes(maxChars int) Library {
 			}
 			sort.Strings(keys)
 			return keys, nil
-		}, Named("list_texts"), Hints(Annotations{ReadOnlyHint: Bool(true)})),
+		}, Named("list_texts"), Hints(Annotations{ReadOnlyHint: new(true)})),
 	)
 }
 
 // Promise identifies a background tool's pending result.
 type Promise struct {
-	Ref    core.Ref    `json:"ref"`
-	Handle core.Handle `json:"handle"`
+	Ref    tardigrade.Ref    `json:"ref"`
+	Handle tardigrade.Handle `json:"handle"`
 }
 
 // Alarm declares reminders delivered as clock promises.
@@ -350,42 +351,42 @@ func Alarm() Library {
 		Promise Promise `json:"promise"`
 	}
 	return New("alarm", "Schedule and cancel reminders.",
-		Task("set_alarm", "Schedule a reminder and return its durable handle immediately. Supply message and either afterSeconds or an RFC 3339 time with a timezone in at. The reminder arrives in the inbox when it is due.", func(c Call, in set) (core.Handle, error) {
+		Task("set_alarm", "Schedule a reminder and return its durable handle immediately. Supply message and either afterSeconds or an RFC 3339 time with a timezone in at. The reminder arrives in the inbox when it is due.", func(c Call, in set) (tardigrade.Handle, error) {
 			if strings.TrimSpace(in.Message) == "" {
-				return core.Handle{}, errors.New("alarm message must not be empty")
+				return tardigrade.Handle{}, errors.New("alarm message must not be empty")
 			}
 			var at time.Time
 			switch {
 			case in.At != "" && in.AfterSeconds == 0:
 				parsed, err := time.Parse(time.RFC3339, in.At)
 				if err != nil {
-					return core.Handle{}, errors.New("at must be an RFC 3339 time with a timezone")
+					return tardigrade.Handle{}, errors.New("at must be an RFC 3339 time with a timezone")
 				}
 				at = parsed
 			case in.At == "" && in.AfterSeconds > 0:
 				at = time.Now().Add(time.Duration(in.AfterSeconds * float64(time.Second)))
 			default:
-				return core.Handle{}, errors.New("supply either a positive afterSeconds or at")
+				return tardigrade.Handle{}, errors.New("supply either a positive afterSeconds or at")
 			}
 			value, _ := json.Marshal(map[string]any{"alarmId": "alarm:" + c.CallID, "at": at.UnixMilli(), "message": in.Message})
-			return core.Handle{Executor: "clock", ID: "alarm:" + c.CallID, At: at.UnixMilli(), Value: value}, nil
-		}, Hints(Annotations{ReadOnlyHint: Bool(false), DestructiveHint: Bool(false)})),
+			return tardigrade.Handle{Executor: tardigrade.ExecutorClock, ID: "alarm:" + c.CallID, At: at.UnixMilli(), Value: value}, nil
+		}, Hints(Annotations{ReadOnlyHint: new(false), DestructiveHint: new(false)})),
 		Tool("cancel_alarm", "Cancel a pending reminder using the complete promise set_alarm returned.", func(c Call, in cancel) (map[string]any, error) {
-			if in.Promise.Handle.Executor != "clock" {
+			if in.Promise.Handle.Executor != tardigrade.ExecutorClock {
 				return nil, errors.New("expected a clock promise")
 			}
-			if status := core.State(c.X, core.PromiseOf(in.Promise.Ref)); status.Status != core.PromisePending {
-				return map[string]any{"cancelled": false, "reason": "promise already settled"}, nil
+			if state := tardigrade.State(c.X, tardigrade.PromiseOf(in.Promise.Ref)); state.Finished {
+				return map[string]any{"cancelled": false, "reason": "the reminder already finished"}, nil
 			}
 			return map[string]any{"cancelled": true}, c.X.Cancel(in.Promise.Ref, "alarm cancelled")
-		}, Hints(Annotations{DestructiveHint: Bool(true), IdempotentHint: Bool(true)})),
+		}, Hints(Annotations{DestructiveHint: new(true), IdempotentHint: new(true)})),
 	)
 }
 
 // Delegator runs method calls on child threads, as host.Host does.
 type Delegator interface {
-	Delegate(parent core.ThreadCoordinate, ref core.Ref, method string, input any) (core.Handle, error)
-	CancelDelegation(handle core.Handle, reason string) error
+	Delegate(parent tardigrade.ThreadCoordinate, ref tardigrade.Ref, method string, input any) (tardigrade.Handle, error)
+	CancelDelegation(handle tardigrade.Handle, reason string) error
 }
 
 // Agents declares delegation of work to child agents through their "message" method; input builds that method's input from the delegated text.
@@ -394,19 +395,19 @@ func Agents(d Delegator, input func(message string) any) Library {
 		Message string `json:"message"`
 	}
 	type cancel struct {
-		Handle core.Handle `json:"handle"`
+		Handle tardigrade.Handle `json:"handle"`
 	}
 	return New("agents", "Delegate work to child agents.",
-		Task("run", "Start a child agent with a message. Returns a durable handle immediately; its result arrives in the inbox.", func(c Call, in run) (core.Handle, error) {
+		Task("run", "Start a child agent with a message. Returns a durable handle immediately; its result arrives in the inbox.", func(c Call, in run) (tardigrade.Handle, error) {
 			return d.Delegate(c.X.Address(), c.X.Ref(), "message", input(in.Message))
-		}, Named("delegate_task"), Hints(Annotations{ReadOnlyHint: Bool(false), OpenWorldHint: Bool(true)}), OnCancel(func(c core.Cleanup, _ Call) error {
+		}, Named("delegate_task"), Hints(Annotations{ReadOnlyHint: new(false), OpenWorldHint: new(true)}), OnCancel(func(c tardigrade.Cleanup, _ Call) error {
 			if c.Handle == nil {
 				return nil
 			}
 			return d.CancelDelegation(*c.Handle, c.Reason)
 		})),
-		Tool("cancel", "Cancel a child using its execution handle. Its promise settles with cancellation if still pending.", func(_ Call, in cancel) (map[string]any, error) {
+		Tool("cancel", "Cancel a child using its execution handle. Its promise finishes as cancelled if the child is still running.", func(_ Call, in cancel) (map[string]any, error) {
 			return map[string]any{"handle": in.Handle, "cancellationRequested": true}, d.CancelDelegation(in.Handle, "cancelled by parent")
-		}, Named("cancel_agent"), Hints(Annotations{DestructiveHint: Bool(true), IdempotentHint: Bool(true)})),
+		}, Named("cancel_agent"), Hints(Annotations{DestructiveHint: new(true), IdempotentHint: new(true)})),
 	)
 }
