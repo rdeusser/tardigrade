@@ -1,6 +1,6 @@
 # Tardigrade for Go
 
-Tardigrade for Go builds durable, event-driven actors in Go. It follows the model of the TypeScript framework: every event is appended to a journal, durable atoms fold the journal into state, effect atoms propose work from that state, and the runtime executes the work and journals its outcome.
+Tardigrade for Go builds durable, event-driven actors in Go. Every event is appended to a journal, durable atoms fold the journal into state, effect atoms propose work from that state, and the runtime executes the work and journals its outcome. A host serves its actors through HostService, a protobuf API defined in `proto/` with Go and TypeScript clients generated into `api/`.
 
 ```text
 { view, effects } = f(event log)
@@ -10,7 +10,7 @@ Tardigrade for Go builds durable, event-driven actors in Go. It follows the mode
 go get github.com/rdeusser/tardigrade/go
 ```
 
-The module needs Go 1.27 and has one dependency, the pure Go SQLite driver `modernc.org/sqlite`.
+The module needs Go 1.27. Its dependencies are the pure Go SQLite driver `modernc.org/sqlite`, `google.golang.org/protobuf`, and `connectrpc.com/connect`.
 
 ## Packages
 
@@ -20,12 +20,16 @@ The module needs Go 1.27 and has one dependency, the pure Go SQLite driver `mode
 | `schema` | JSON Schemas derived from Go types and strict decoding at trust boundaries |
 | `tardigrade` | Events, durable and effect atoms, acts and their handlers, methods, actors, journals, and the runtime |
 | `sqlite` | Thread journals and the thread directory in one SQLite database |
-| `host` | Runs an actor's threads, resumes unfinished work, delegates to child threads, serves HTTP |
-| `api`, `client` | Wire types of the HTTP method API and a Go client for it |
-| `model` | Provider-neutral model calls over Anthropic Messages and OpenAI Chat Completions |
+| `host` | Runs actors' threads, resumes unfinished work, delegates to child threads of any served actor, serves HostService |
+| `proto/tardigrade/v1` | The HostService definition |
+| `api/tardigrade/v1` | Go messages, client, and handler interface generated from `proto/` |
+| `api/typescript` | The generated TypeScript client package, `@tardigrade/api` |
+| `model` | Model calls to any server implementing Anthropic Messages or OpenAI Chat Completions |
 | `library` | Typed tool libraries: filesystem, fetch, notes, alarm, and child agents |
 | `agent` | The agent actor: turns, tools, permissions, budgets, and compaction |
 | `cmd/tdg` | The CLI: serve the agent, chat, call methods, read journals, scaffold projects |
+
+`buf generate` regenerates `api/` from `proto/`; it runs the Go plugins as module tools and the TypeScript plugin from `api/typescript/node_modules`, so run `bun install` there first.
 
 ## Counter actor
 
@@ -74,7 +78,7 @@ var counter = tardigrade.DefineActor("counter", notify, map[string]tardigrade.Me
 })
 ```
 
-A handler is the Go code that runs an act; `Act.Handle` builds one. The actor definition holds no handlers, so a host can supply different ones per thread, such as a workspace per thread, or fakes in tests.
+A handler is the Go code that runs an act; `Act.Handle` builds one. The actor definition holds no handlers, so a host can supply different ones per thread, such as a workspace per thread, or fakes in tests. A host serves any number of actors from one store; the address passed to `Handlers` names the thread's actor.
 
 ```go
 store, _ := sqlite.Open(".tardigrade/data/host.sqlite")
@@ -82,10 +86,10 @@ notify := Notify.Handle(func(_ *tardigrade.Execution, n int) (tardigrade.Result[
 	log.Printf("%d is even", n)
 	return tardigrade.Value(struct{}{}), nil
 }, nil)
-h, _ := host.New(host.Options{Actor: counter, Store: store, Handlers: func(*host.Host, tardigrade.ThreadCoordinate) []tardigrade.Handler {
+h, _ := host.New(host.Options{Actors: []*tardigrade.Actor{counter}, Store: store, Handlers: func(*host.Host, tardigrade.ThreadCoordinate) []tardigrade.Handler {
 	return []tardigrade.Handler{notify}
 }})
-http.ListenAndServe(":4242", h.Handler(host.HTTPOptions{}))
+http.ListenAndServe(":4242", h.Handler(host.HandlerOptions{}))
 ```
 
 `tdg init counter` writes this project, and `tdg init meeseeks --template agent` writes an agent project.
@@ -102,28 +106,29 @@ meeseeks := agent.New(agent.Options{
 	Tools: library.Specs(library.Filesystem(nil)),
 })
 router := &model.Router{Config: config}
-h, _ := host.New(host.Options{Actor: meeseeks, Store: store, Handlers: func(_ *host.Host, t tardigrade.ThreadCoordinate) []tardigrade.Handler {
+h, _ := host.New(host.Options{Actors: []*tardigrade.Actor{meeseeks}, Store: store, Handlers: func(_ *host.Host, t tardigrade.ThreadCoordinate) []tardigrade.Handler {
 	workspace := library.LocalWorkspace{Dir: filepath.Join("workspace", t.Instance, t.Thread)}
 	return agent.Handlers(agent.Services{Model: router, Tools: library.NewRegistry(library.Filesystem(workspace))})
 }})
 ```
 
-`agent.Options.Permissions` gates tool calls by policy and sends `ask` decisions to `agent.Services.Permission`. `agent.Options.Budget` limits counted tool calls per turn. `agent.Options.Compaction` bounds the context: above `TriggerRatio` of the context window the agent summarizes older messages and keeps a tail near `RetainRatio`.
+`library.Agents(h, "researcher", input)` lets an agent delegate to child threads of the `researcher` actor on the same host; the child's answer returns to the parent as a new turn. `agent.Options.Permissions` gates tool calls by policy and sends `ask` decisions to `agent.Services.Permission`. `agent.Options.Budget` limits counted tool calls per turn. `agent.Options.Compaction` bounds the context: above `TriggerRatio` of the context window the agent summarizes older messages and keeps a tail near `RetainRatio`.
 
 ## Configuration
 
-The model configuration names a default model and connects providers. Providers named `anthropic`, `openai`, `openrouter`, and `google` inherit preset base URLs, protocols, and credential variables; other providers set `baseUrl`, `protocol` (`anthropic-messages` or `openai-chat-completions`), and `env`.
+The model configuration names a default model and connects providers. Each provider speaks `anthropic-messages` or `openai-chat-completions`, so any server implementing the Anthropic Messages API or the OpenAI Chat Completions API can serve it, including a model server on the same machine. A provider sets `baseUrl`, `protocol`, and `env`, the variables holding its API key. A provider named `openrouter` inherits OpenRouter's base URL, the chat completions protocol, and `OPENROUTER_API_KEY` for the fields it leaves empty.
 
 ```json
 {
   "default": { "provider": "openrouter", "model_id": "anthropic/claude-sonnet-4.6" },
   "providers": {
-    "openrouter": { "models": { "anthropic/claude-sonnet-4.6": { "contextWindowTokens": 200000 } } }
+    "openrouter": { "models": { "anthropic/claude-sonnet-4.6": { "contextWindowTokens": 200000 } } },
+    "local": { "baseUrl": "http://127.0.0.1:8080/v1", "protocol": "openai-chat-completions", "models": { "qwen3": { "contextWindowTokens": 32768 } } }
   }
 }
 ```
 
-`models.<id>.options` holds provider request fields merged into each request body, such as `{"thinking": {"type": "adaptive"}}` for Anthropic or `{"reasoning_effort": "high"}` for chat completions.
+`models.<id>.options` holds provider request fields merged into each request body, such as `{"thinking": {"type": "adaptive"}}` for Anthropic Messages or `{"reasoning_effort": "high"}` for chat completions. `maxTokensField` names the chat completions output bound field for servers that expect `max_completion_tokens`.
 
 ## CLI
 
@@ -135,29 +140,51 @@ tdg call t1 message '{"text":"audit the deploy"}' --wait
 tdg events t1 --follow
 ```
 
-`tdg serve` hosts the agent with filesystem, fetch, notes, alarm, and child-agent tools. It reads `PORT`, `TARDIGRADE_ACTOR_DATA`, `TARDIGRADE_WORKSPACE`, `TARDIGRADE_TOKEN`, and the model configuration from `TARDIGRADE_CONFIG` or the file `TARDIGRADE_CONFIG_PATH` names. When a model has no `contextWindowTokens`, serve looks it up in the models.dev catalog.
+`tdg serve` hosts the agent with filesystem, fetch, notes, alarm, and child-agent tools. It reads `PORT`, `TARDIGRADE_ACTOR_DATA`, `TARDIGRADE_WORKSPACE`, `TARDIGRADE_TOKEN`, and the model configuration from `TARDIGRADE_CONFIG` or the file `TARDIGRADE_CONFIG_PATH` names; the default model must set `contextWindowTokens`. Client commands address threads of `--actor`, which defaults to the host's only actor.
 
-## HTTP API
+## HostService
 
-| Route | |
+`host.Host.Handler` serves HostService over the Connect, gRPC, and gRPC-Web protocols, plus a public `GET /healthz`. Connect clients work over HTTP/1.1; gRPC clients need HTTP/2, which `tdg serve` accepts without TLS.
+
+| Procedure | |
 | --- | --- |
-| `GET /healthz` | Liveness, public |
-| `GET /v1/metadata` | Actor name and API generation |
-| `GET /v1/methods` | Methods with input and output JSON Schemas |
-| `GET /v1/actors/{instance}/threads` | Thread directory |
-| `POST /v1/actors/{instance}/threads` | Allocate a thread with an optional `name` and `parent` |
-| `POST .../threads/{thread}/methods/{method}` | Call a method; `Idempotency-Key` names the call |
-| `GET .../methods/{method}/calls/{id}` | Read a call: `pending`, `completed`, `failed`, or `cancelled` |
-| `PUT .../methods/{method}/calls/{id}/cancellation` | Cancel a call with a `reason` |
-| `GET .../threads/{thread}/events` | Journal rows after a one-based `after` cursor |
-| `GET .../threads/{thread}/events/stream` | Journal rows as server-sent events, resuming from `Last-Event-ID` |
-| `GET .../threads/{thread}/execution/stream` | Transient execution updates, such as streamed model text |
+| `ListActors` | Served actors with their methods and input and output JSON Schemas |
+| `CreateThread` | Allocate a thread of an actor, optionally as a child of another thread |
+| `ListThreads` | The thread directory, filtered by actor and instance |
+| `StartCall` | Journal a method call under a caller-chosen call ID |
+| `GetCall`, `WatchCall` | Read a call, or stream it until it finishes |
+| `CancelCall` | Ask a cancellable call to stop |
+| `ListRecords`, `WatchRecords` | Journal records after a one-based position, or stream them as they commit |
+| `WatchUpdates` | Transient execution updates, such as streamed model text |
 
-When `TARDIGRADE_TOKEN` is set, every route except `/healthz` requires `Authorization: Bearer`. Declared failures return `{"code", "message"}` with a 4xx status.
+Method inputs and outputs travel as `google.protobuf.Value` and journal events as `google.protobuf.Struct`, so each actor keeps its own JSON shapes. `StartCall` absorbs a repeated call with the same ID and input, and an absent input is the empty object. When `TARDIGRADE_TOKEN` is set, every procedure requires `Authorization: Bearer`.
+
+| Error | Code |
+| --- | --- |
+| Invalid input, or a name with a slash | `invalid_argument` |
+| Unknown actor, thread, method, or call | `not_found` |
+| A call ID reused with other input | `aborted` |
+| A stopped actor, or a method without cancellation | `failed_precondition` |
+| A closing host | `unavailable` |
+| A missing or wrong token | `unauthenticated` |
+
+The TypeScript client builds on `@connectrpc/connect`:
+
+```ts
+import { fromJson } from "@bufbuild/protobuf"
+import { ValueSchema } from "@bufbuild/protobuf/wkt"
+import { createHostClient } from "@tardigrade/api"
+
+const client = createHostClient("http://localhost:4242", process.env.TARDIGRADE_TOKEN)
+const thread = { actor: "counter", instance: "main", thread: "t1" }
+await client.createThread({ actor: "counter", instance: "main", name: "t1" })
+await client.startCall({ thread, method: "increment", callId: "c1", input: fromJson(ValueSchema, {}) })
+for await (const { call } of client.watchCall({ thread, callId: "c1" })) console.log(call?.status)
+```
 
 ## Runtime guarantees
 
-Each thread has one runtime. A commit appends an event and the events its act callbacks derive as one journal batch; when a transition rejects the batch or the append fails, the runtime restores its registry and operation table (`tardigrade/runtime_test.go`, `TestRejectedEventLeavesStateUnchanged`). Accepted work is journaled before it runs, so a reopened journal resumes unfinished work once and records its outcome (`TestReplayResumesPendingWorkOnce`). Retries journal each attempt and its absolute wake time (`TestRetryJournalsAttempts`). Cancellation journals the decision, interrupts the work, and runs the act's cleanup until it succeeds (`TestCancellationRunsCleanup`). A panic in an act records a terminal defect and stops the actor (`TestPanicStopsActor`). Checkpoints save durable atom states while no work is active, so replay folds only later records (`TestCheckpointLimitsReplay`). A host records which threads hold unfinished work and resumes them when it opens the store (`host/host_test.go`, `TestRestartResumesActiveThreads`).
+Each thread has one runtime. A commit appends an event and the events its act callbacks derive as one journal batch; when a transition rejects the batch or the append fails, the runtime restores its registry and operation table (`tardigrade/runtime_test.go`, `TestRejectedEventLeavesStateUnchanged`). Accepted work is journaled before it runs, so a reopened journal resumes unfinished work once and records its outcome (`TestReplayResumesPendingWorkOnce`). Retries journal each attempt and its absolute wake time (`TestRetryJournalsAttempts`). Cancellation journals the decision, interrupts the work, and runs the act's cleanup until it succeeds (`TestCancellationRunsCleanup`). A panic in an act records a terminal defect and stops the actor (`TestPanicStopsActor`). Checkpoints save durable atom states while no work is active, so replay folds only later records (`TestCheckpointLimitsReplay`). A host records which threads hold unfinished work and resumes them when it opens the store (`host/host_test.go`, `TestRestartResumesActiveThreads`). Delegation to another actor's thread finishes the parent's promise with the child call's result (`agent/delegation_test.go`, `TestDelegationToAnotherActorReturnsAnswerAsTurn`).
 
 Work that finishes later returns a handle, and its executor finishes it: `tardigrade.ExecutorLocal` for producers started with `tardigrade.Fork`, `tardigrade.ExecutorClock` for timers, `tardigrade.ExecutorThread` for method calls on child threads, and the host's `tardigrade.Promises` service for any other executor, which calls `Runtime.Finish`. Work finishes with a value or a `tardigrade.Failure`, and act callbacks receive that as a `tardigrade.Outcome` with `Value` and `Err`.
 
@@ -174,6 +201,7 @@ Every policy value is exported and overridable where it applies.
 | `tardigrade.DefaultInputDigestMinBytes` | 2 KiB | `tardigrade.Policy.InputDigestMinBytes` |
 | `host.DefaultMaxDepth` | 3 | `host.Options.MaxDepth` |
 | `host.DefaultStreamBuffer` | 64 updates | `host.Options.StreamBuffer` |
+| `host.DefaultReadMaxBytes` | 8 MiB | `host.HandlerOptions.ReadMaxBytes` |
 | `model.DefaultMaxOutputTokens` | 32,768 | `models.<id>.maxOutputTokens` |
 | `model.DefaultFirstChunk`, `model.DefaultIdle` | 60s | `model.Config.FirstChunk`, `model.Config.Idle` |
 | `agent.DefaultModelTimeout` | 90s | `agent.Services.AttemptTimeout` |
@@ -184,6 +212,6 @@ Every policy value is exported and overridable where it applies.
 
 ## Scope
 
-The Go module covers the actor runtime, the self-hosted SQLite host, the HTTP method API and its client, the model providers, the tool libraries, the agent, and the CLI. Cloudflare and Celld hosting stay in TypeScript because Durable Objects are JavaScript classes. Code mode stays in TypeScript because it runs model-written JavaScript; the Go agent calls tools directly. The Go runtime keeps act inputs at or above `tardigrade.DefaultInputDigestMinBytes` beside the journal until their work completes, and keeps file content inline in events.
+Tardigrade for Go is self-contained: its journals, hosts, and HostService are shared only by programs built on this module and clients generated from `proto/`. TypeScript programs reach a host through `@tardigrade/api` as clients. Hosts run on a workstation or a local cluster with SQLite storage, and the only network services they call are model providers; OpenRouter is the hosted provider the configuration knows by name. The agent calls tools directly. The runtime keeps act inputs at or above `tardigrade.DefaultInputDigestMinBytes` beside the journal until their work completes, and keeps file content inline in events.
 
 Event types evolve through Go's `encoding/json`: a type that reads an older shape implements `UnmarshalJSON`. Journal records whose event type no process registered decode as `tardigrade.RawEvent`, which no transition accepts.

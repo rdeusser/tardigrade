@@ -217,7 +217,7 @@ See the [Cloudflare](docs/platforms/cloudflare.mdx) and [Celld](docs/platforms/c
 
 ## Go
 
-[Tardigrade for Go](go/README.md) implements the same actor model in Go: durable and effect atoms, a self-hosted SQLite host with the HTTP method API, model providers, tool libraries, the agent, and the `tdg` CLI.
+[Tardigrade for Go](go/README.md) implements the actor model as a self-contained Go module: durable and effect atoms, a SQLite host serving its actors through a protobuf and Connect API with a generated TypeScript client, model providers, tool libraries, the agent, and the `tdg` CLI.
 
 ## Contributing
 
