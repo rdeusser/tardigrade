@@ -4,13 +4,18 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
-	"github.com/rdeusser/tardigrade/go/client"
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/structpb"
+
+	tardigradev1 "github.com/rdeusser/tardigrade/go/api/tardigrade/v1"
+	"github.com/rdeusser/tardigrade/go/api/tardigrade/v1/tardigradev1connect"
 	"github.com/rdeusser/tardigrade/go/host"
 	"github.com/rdeusser/tardigrade/go/reactive"
 	"github.com/rdeusser/tardigrade/go/sqlite"
@@ -99,7 +104,7 @@ func relayActs(release <-chan struct{}) func(h *host.Host, address tardigrade.Th
 	return func(h *host.Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler {
 		return []tardigrade.Handler{
 			Delegate.Handle(func(x *tardigrade.Execution, in askInput) (tardigrade.Result[string], error) {
-				handle, err := h.Delegate(x.Address(), x.Ref(), "ask", askInput{Depth: in.Depth - 1})
+				handle, err := h.Delegate(x.Address(), x.Ref(), "relay", "ask", askInput{Depth: in.Depth - 1})
 				if err != nil {
 					return tardigrade.Result[string]{}, err
 				}
@@ -119,56 +124,109 @@ func relayActs(release <-chan struct{}) func(h *host.Host, address tardigrade.Th
 	}
 }
 
-func start(t *testing.T, path string, release <-chan struct{}) (*host.Host, *client.Client) {
+type bearer struct {
+	token string
+	next  http.RoundTripper
+}
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return b.next.RoundTrip(r)
+}
+
+func connectTo(server *httptest.Server, token string) tardigradev1connect.HostServiceClient {
+	return tardigradev1connect.NewHostServiceClient(&http.Client{Transport: bearer{token, server.Client().Transport}}, server.URL)
+}
+
+func start(t *testing.T, path string, release <-chan struct{}) (*host.Host, *httptest.Server) {
 	t.Helper()
 	store, err := sqlite.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := host.New(host.Options{Actor: relayActor, Store: store, Handlers: relayActs(release)})
+	h, err := host.New(host.Options{Actors: []*tardigrade.Actor{relayActor}, Store: store, Handlers: relayActs(release)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(h.Handler(host.HTTPOptions{Token: "secret"}))
+	server := httptest.NewServer(h.Handler(host.HandlerOptions{Token: "secret"}))
 	t.Cleanup(func() {
 		server.Close()
 		h.Close()
 		store.Close()
 	})
-	return h, client.New(server.URL, "secret")
+	return h, server
 }
 
-func TestDelegationSettlesThroughChildThreads(t *testing.T) {
-	_, c := start(t, filepath.Join(t.TempDir(), "host.sqlite"), nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if metadata, err := c.Metadata(ctx); err != nil || metadata.Name != "relay" {
-		t.Fatalf("metadata = %+v, %v", metadata, err)
-	}
-	thread, err := c.CreateThread(ctx, "main", "root", "")
+func await(ctx context.Context, t *testing.T, c tardigradev1connect.HostServiceClient, thread *tardigradev1.ThreadRef, id string) *tardigradev1.Call {
+	t.Helper()
+	stream, err := c.WatchCall(ctx, connect.NewRequest(&tardigradev1.WatchCallRequest{Thread: thread, CallId: id}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Invoke(ctx, thread, "ask", "q1", askInput{Depth: 2}); err != nil {
+	var last *tardigradev1.Call
+	for stream.Receive() {
+		last = stream.Msg().Call
+	}
+	if err := stream.Err(); err != nil {
 		t.Fatal(err)
 	}
-	state, err := c.Await(ctx, thread, "ask", "q1", 10*time.Millisecond)
-	if err != nil || state.Status != tardigrade.StatusCompleted || string(state.Output) != `"answered at root.2.2"` {
-		t.Fatalf("state = %+v, %v", state, err)
+	return last
+}
+
+func ask(ctx context.Context, c tardigradev1connect.HostServiceClient, thread *tardigradev1.ThreadRef, method, id string, depth int) error {
+	input, _ := structpb.NewValue(map[string]any{"depth": depth})
+	_, err := c.StartCall(ctx, connect.NewRequest(&tardigradev1.StartCallRequest{Thread: thread, Method: method, CallId: id, Input: input}))
+	return err
+}
+
+func TestDelegationFinishesThroughChildThreads(t *testing.T) {
+	_, server := start(t, filepath.Join(t.TempDir(), "host.sqlite"), nil)
+	c := connectTo(server, "secret")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	actors, err := c.ListActors(ctx, connect.NewRequest(&tardigradev1.ListActorsRequest{}))
+	if err != nil || len(actors.Msg.Actors) != 1 || actors.Msg.Actors[0].Name != "relay" || actors.Msg.Actors[0].Methods[0].InputSchema.Fields["type"].GetStringValue() != "object" {
+		t.Fatalf("actors = %v, %v", actors, err)
 	}
-	threads, err := c.Threads(ctx, "main")
-	if err != nil || len(threads) != 3 || threads[2].Depth != 2 {
-		t.Fatalf("threads = %+v, %v", threads, err)
+	created, err := c.CreateThread(ctx, connect.NewRequest(&tardigradev1.CreateThreadRequest{Actor: "relay", Instance: "main", Name: "root"}))
+	if err != nil {
+		t.Fatal(err)
 	}
-	rows, err := c.Events(ctx, thread, 0)
-	if err != nil || len(rows) == 0 || rows[0].Seq != 1 {
-		t.Fatalf("events = %v, %v", rows, err)
+	thread := created.Msg.Thread.Ref
+	if err := ask(ctx, c, thread, "ask", "q1", 2); err != nil {
+		t.Fatal(err)
 	}
-	if err := c.Invoke(ctx, thread, "missing", "q2", askInput{}); err == nil {
-		t.Fatal("unknown method accepted")
+	if call := await(ctx, t, c, thread, "q1"); call.Status != tardigradev1.CallStatus_CALL_STATUS_COMPLETED || call.GetOutput().GetStringValue() != "answered at root.2.2" || call.Method != "ask" {
+		t.Fatalf("call = %v", call)
 	}
-	if _, err := client.New(c.BaseURL, "").Methods(ctx); err == nil {
-		t.Fatal("missing token accepted")
+	threads, err := c.ListThreads(ctx, connect.NewRequest(&tardigradev1.ListThreadsRequest{Actor: "relay", Instance: "main"}))
+	if err != nil || len(threads.Msg.Threads) != 3 || threads.Msg.Threads[2].Depth != 2 || threads.Msg.Threads[1].Parent.GetThread() != "root" {
+		t.Fatalf("threads = %v, %v", threads, err)
+	}
+	records, err := c.ListRecords(ctx, connect.NewRequest(&tardigradev1.ListRecordsRequest{Thread: thread, Limit: 2}))
+	if err != nil || len(records.Msg.Records) != 2 || records.Msg.Records[0].Seq != 1 {
+		t.Fatalf("records = %v, %v", records, err)
+	}
+	watch, err := c.WatchRecords(ctx, connect.NewRequest(&tardigradev1.WatchRecordsRequest{Thread: thread}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for watch.Receive() && watch.Msg().Record.MessageId != "q1" {
+	}
+	if record := watch.Msg().Record; record.MessageId != "q1" || record.Event.Fields["type"].GetStringValue() != record.Type {
+		t.Fatalf("watched record = %v, %v", record, watch.Err())
+	}
+	watch.Close()
+	codes := map[string]connect.Code{}
+	codes["conflict"] = connect.CodeOf(ask(ctx, c, thread, "ask", "q1", 3))
+	codes["method"] = connect.CodeOf(ask(ctx, c, thread, "missing", "q2", 0))
+	codes["actor"] = connect.CodeOf(ask(ctx, c, &tardigradev1.ThreadRef{Actor: "nobody", Instance: "main", Thread: "root"}, "ask", "q3", 0))
+	_, err = connectTo(server, "wrong").ListActors(ctx, connect.NewRequest(&tardigradev1.ListActorsRequest{}))
+	codes["token"] = connect.CodeOf(err)
+	want := map[string]connect.Code{"conflict": connect.CodeAborted, "method": connect.CodeNotFound, "actor": connect.CodeNotFound, "token": connect.CodeUnauthenticated}
+	if !maps.Equal(codes, want) {
+		t.Fatalf("codes = %v", codes)
 	}
 }
 
@@ -179,14 +237,15 @@ func TestRestartResumesActiveThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := host.New(host.Options{Actor: relayActor, Store: store, Handlers: relayActs(blocked)})
+	h, err := host.New(host.Options{Actors: []*tardigrade.Actor{relayActor}, Store: store, Handlers: relayActs(blocked)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.CreateThread("main", "root", ""); err != nil {
+	address, err := h.CreateThread("relay", "main", "root", nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	rt, _ := h.Thread("main", "root")
+	rt, _ := h.Thread(address)
 	if err := rt.Invoke("ask", "q1", tardigrade.Sender{Kind: "external", ID: "test"}, []byte(`{"depth":0}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -195,12 +254,11 @@ func TestRestartResumesActiveThreads(t *testing.T) {
 
 	released := make(chan struct{})
 	close(released)
-	resumed, c := start(t, path, released)
+	resumed, server := start(t, path, released)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	state, err := c.Await(ctx, tardigrade.ThreadCoordinate{Instance: "main", Thread: "root"}, "ask", "q1", 10*time.Millisecond)
-	if err != nil || state.Status != tardigrade.StatusCompleted {
-		t.Fatalf("state = %+v, %v", state, err)
+	if call := await(ctx, t, connectTo(server, "secret"), &tardigradev1.ThreadRef{Actor: "relay", Instance: "main", Thread: "root"}, "q1"); call.Status != tardigradev1.CallStatus_CALL_STATUS_COMPLETED {
+		t.Fatalf("call = %v", call)
 	}
 	if err := resumed.WaitIdle(5 * time.Second); err != nil {
 		t.Fatal(err)

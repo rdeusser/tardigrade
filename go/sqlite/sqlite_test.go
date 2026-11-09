@@ -78,3 +78,27 @@ func TestJournalContract(t *testing.T) {
 		t.Fatal("read past length succeeded")
 	}
 }
+
+func TestThreadDirectorySpansActors(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "host.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	parent := tardigrade.ThreadCoordinate{Actor: "lead", Instance: "main", Thread: "t1"}
+	child := tardigrade.ThreadCoordinate{Actor: "helper", Instance: "main", Thread: "t1.4"}
+	for _, info := range []tardigrade.ThreadInfo{{Address: parent, CreatedAt: 1}, {Address: child, Parent: &parent, Depth: 1, CreatedAt: 2}} {
+		if _, err := store.CreateThread(info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := store.Thread(child); got == nil || got.Parent == nil || *got.Parent != parent || got.Depth != 1 {
+		t.Fatalf("child = %+v", got)
+	}
+	if all, _ := store.Threads("", ""); len(all) != 2 || all[0].Parent != nil {
+		t.Fatalf("all threads = %+v", all)
+	}
+	if helpers, _ := store.Threads("helper", "main"); len(helpers) != 1 || helpers[0].Address != child {
+		t.Fatalf("helper threads = %+v", helpers)
+	}
+}

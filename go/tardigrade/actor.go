@@ -50,8 +50,9 @@ func CancelledResult[O any](reason string) *MethodResult[O] {
 	return &MethodResult[O]{Status: StatusCancelled, Reason: reason}
 }
 
-// MethodState is a method call's state as callers read it.
-type MethodState struct {
+// CallState is a method call's state as callers read it.
+type CallState struct {
+	Method string          `json:"method"`
 	Status CallStatus      `json:"status"`
 	Output json.RawMessage `json:"output,omitempty"`
 	Error  string          `json:"error,omitempty"`
@@ -70,7 +71,7 @@ type Method struct {
 	inputSchema  json.RawMessage
 	outputSchema json.RawMessage
 	receive      func(input json.RawMessage, c MethodContext) (Event, error)
-	result       func(input json.RawMessage, g reactive.Getter, c MethodContext) (*MethodState, error)
+	result       func(input json.RawMessage, g reactive.Getter, c MethodContext) (*CallState, error)
 	cancel       func(input json.RawMessage, c MethodContext, reason string) (Event, error)
 }
 
@@ -89,7 +90,7 @@ func NewMethod[I, O any](spec MethodSpec[I, O]) Method {
 			}
 			return spec.OnReceive(in, c), nil
 		},
-		result: func(input json.RawMessage, g reactive.Getter, c MethodContext) (*MethodState, error) {
+		result: func(input json.RawMessage, g reactive.Getter, c MethodContext) (*CallState, error) {
 			in, err := schema.Decode[I](input)
 			if err != nil {
 				return nil, err
@@ -98,7 +99,7 @@ func NewMethod[I, O any](spec MethodSpec[I, O]) Method {
 			if result == nil {
 				return nil, nil
 			}
-			state := &MethodState{Status: result.Status, Error: result.Error, Reason: result.Reason}
+			state := &CallState{Status: result.Status, Error: result.Error, Reason: result.Reason}
 			if result.Status == StatusCompleted {
 				if state.Output, err = json.Marshal(result.Output); err != nil {
 					return nil, err

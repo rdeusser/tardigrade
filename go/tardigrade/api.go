@@ -88,64 +88,70 @@ func protectEvent(run func() (Event, error)) (event Event, err error) {
 	return run()
 }
 
-// Call returns the state of a method call.
-func (rt *Runtime) Call(method, id string) (MethodState, error) {
-	m, ok := rt.opts.Actor.methods[method]
-	if !ok {
-		return MethodState{}, fmt.Errorf("%w: %s", ErrUnknownMethod, method)
-	}
+// Call returns the state of the method call journaled under id.
+func (rt *Runtime) Call(id string) (CallState, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if rt.closed {
-		return MethodState{}, ErrClosed
+		return CallState{}, ErrClosed
 	}
-	record, _, err := rt.opts.Journal.Message(id)
+	invocation, m, err := rt.invocation(id)
 	if err != nil {
-		return MethodState{}, err
+		return CallState{}, err
 	}
-	if record == nil || record.Message.Invocation == nil || record.Message.Invocation.Method != method {
-		return MethodState{}, fmt.Errorf("%w: %s/%s", ErrUnknownCall, method, id)
-	}
-	state, err := func() (state *MethodState, err error) {
+	state, err := func() (state *CallState, err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = panicError(r)
 			}
 		}()
-		return m.result(record.Message.Invocation.Input, rt.registry, MethodContext{ID: id, Method: method})
+		return m.result(invocation.Input, rt.registry, MethodContext{ID: id, Method: invocation.Method})
 	}()
-	if err != nil {
-		return MethodState{}, err
-	}
-	if state != nil {
+	switch {
+	case err != nil:
+		return CallState{}, err
+	case state != nil:
+		state.Method = invocation.Method
 		return *state, nil
+	case rt.defect != nil:
+		return CallState{Method: invocation.Method, Status: StatusFailed, Error: rt.defect.Diagnostic}, nil
 	}
-	if rt.defect != nil {
-		return MethodState{Status: StatusFailed, Error: rt.defect.Diagnostic}, nil
-	}
-	return MethodState{Status: StatusPending}, nil
+	return CallState{Method: invocation.Method, Status: StatusPending}, nil
 }
 
-// CancelCall asks a cancellable method call to stop. The request is recorded under the message ID "cancel:" + id, so repeating it is absorbed.
-func (rt *Runtime) CancelCall(method, id, reason string, from Sender) error {
-	m, ok := rt.opts.Actor.methods[method]
+// invocation returns the method call journaled under id; callers hold the lock.
+func (rt *Runtime) invocation(id string) (*Invocation, Method, error) {
+	record, _, err := rt.opts.Journal.Message(id)
+	if err != nil {
+		return nil, Method{}, err
+	}
+	if record == nil || record.Message.Invocation == nil {
+		return nil, Method{}, fmt.Errorf("%w: %s", ErrUnknownCall, id)
+	}
+	m, ok := rt.opts.Actor.methods[record.Message.Invocation.Method]
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrUnknownMethod, method)
+		return nil, Method{}, fmt.Errorf("%w: %s", ErrUnknownMethod, record.Message.Invocation.Method)
 	}
-	if m.cancel == nil {
-		return ErrNotCancellable
-	}
+	return record.Message.Invocation, m, nil
+}
+
+// CancelCall asks the method call journaled under id to stop. Only its sender may cancel it, and only if its method is cancellable. The request is recorded under the message ID "cancel:" + id, so repeating it is absorbed.
+func (rt *Runtime) CancelCall(id, reason string, from Sender) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if err := rt.usable(); err != nil {
 		return err
 	}
-	original, _, err := rt.opts.Journal.Message(id)
+	invocation, m, err := rt.invocation(id)
 	if err != nil {
 		return err
 	}
-	if original == nil || original.Message.Invocation == nil || original.Message.Invocation.Method != method {
-		return fmt.Errorf("%w: %s/%s", ErrUnknownCall, method, id)
+	if m.cancel == nil {
+		return ErrNotCancellable
+	}
+	original, _, err := rt.opts.Journal.Message(id)
+	if err != nil {
+		return err
 	}
 	if original.Message.From != from {
 		return &InvalidInputError{Err: errors.New("cancellation requires the invoking sender")}
@@ -155,7 +161,7 @@ func (rt *Runtime) CancelCall(method, id, reason string, from Sender) error {
 		return err
 	}
 	event, err := protectEvent(func() (Event, error) {
-		return m.cancel(original.Message.Invocation.Input, MethodContext{ID: id, Method: method}, reason)
+		return m.cancel(invocation.Input, MethodContext{ID: id, Method: invocation.Method}, reason)
 	})
 	if err != nil {
 		return &InvalidInputError{Err: err}

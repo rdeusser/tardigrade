@@ -77,7 +77,7 @@ func main() {
 		log.Printf("%d is even", n)
 		return tardigrade.Value(struct{}{}), nil
 	}, nil)
-	h, err := host.New(host.Options{Actor: counter, Store: store, Handlers: func(*host.Host, tardigrade.ThreadCoordinate) []tardigrade.Handler {
+	h, err := host.New(host.Options{Actors: []*tardigrade.Actor{counter}, Store: store, Handlers: func(*host.Host, tardigrade.ThreadCoordinate) []tardigrade.Handler {
 		return []tardigrade.Handler{notifyImpl}
 	}})
 	if err != nil {
@@ -89,7 +89,7 @@ func main() {
 		addr = ":" + port
 	}
 	log.Printf("counter listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, h.Handler(host.HTTPOptions{Token: os.Getenv("TARDIGRADE_TOKEN")})))
+	log.Fatal(http.ListenAndServe(addr, h.Handler(host.HandlerOptions{Token: os.Getenv("TARDIGRADE_TOKEN")})))
 }
 `
 
@@ -127,7 +127,7 @@ func main() {
 		Tools:               library.Specs(library.Filesystem(nil)),
 	})
 	router := &model.Router{Config: config}
-	h, err := host.New(host.Options{Actor: meeseeks, Store: store, Handlers: func(_ *host.Host, t tardigrade.ThreadCoordinate) []tardigrade.Handler {
+	h, err := host.New(host.Options{Actors: []*tardigrade.Actor{meeseeks}, Store: store, Handlers: func(_ *host.Host, t tardigrade.ThreadCoordinate) []tardigrade.Handler {
 		workspace := library.LocalWorkspace{Dir: filepath.Join(".tardigrade/workspace", t.Instance, t.Thread)}
 		return agent.Handlers(agent.Services{Model: router, Tools: library.NewRegistry(library.Filesystem(workspace))})
 	}})
@@ -136,14 +136,14 @@ func main() {
 	}
 	defer h.Close()
 	log.Printf("meeseeks serving %s on :4242", config.Default)
-	log.Fatal(http.ListenAndServe(":4242", h.Handler(host.HTTPOptions{Token: os.Getenv("TARDIGRADE_TOKEN")})))
+	log.Fatal(http.ListenAndServe(":4242", h.Handler(host.HandlerOptions{Token: os.Getenv("TARDIGRADE_TOKEN")})))
 }
 `
 
 const agentConfig = `{
-  "default": { "provider": "anthropic", "model_id": "claude-sonnet-4-5" },
+  "default": { "provider": "openrouter", "model_id": "anthropic/claude-sonnet-4.6" },
   "providers": {
-    "anthropic": { "models": { "claude-sonnet-4-5": { "contextWindowTokens": 200000 } } }
+    "openrouter": { "models": { "anthropic/claude-sonnet-4.6": { "contextWindowTokens": 200000 } } }
   }
 }
 `
@@ -189,7 +189,7 @@ func initProject(flags *flag.FlagSet, args []string, out io.Writer) error {
 	}
 	steps := []string{"cd " + dir, "go mod tidy"}
 	if *template == "agent" {
-		steps = append(steps, `export ANTHROPIC_API_KEY=...`, `TARDIGRADE_CONFIG="$(cat models.json)" go run .`)
+		steps = append(steps, `export OPENROUTER_API_KEY=...`, `TARDIGRADE_CONFIG="$(cat models.json)" go run .`)
 	} else {
 		steps = append(steps, "go run .")
 	}

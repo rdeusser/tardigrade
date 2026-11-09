@@ -196,7 +196,7 @@ type ModelConfig struct {
 	MaxOutputTokens     int                        `json:"maxOutputTokens,omitempty"`
 }
 
-// Config selects a default model and connects providers. Providers named like a preset inherit the preset's fields they leave empty.
+// Config selects a default model and connects providers. A provider named "openrouter" inherits the OpenRouter fields it leaves empty; every other provider sets its base URL and protocol.
 type Config struct {
 	Default   Ref                       `json:"default"`
 	Providers map[string]ProviderConfig `json:"providers"`
@@ -205,55 +205,44 @@ type Config struct {
 	Idle       time.Duration `json:"-"`
 }
 
-// Presets are provider connections the configuration can name without a base URL or protocol.
-var Presets = map[string]ProviderConfig{
-	"anthropic":  {BaseURL: "https://api.anthropic.com", Protocol: AnthropicMessages, Env: []string{"ANTHROPIC_API_KEY"}},
-	"openai":     {BaseURL: "https://api.openai.com/v1", Protocol: OpenAIChatCompletions, Env: []string{"OPENAI_API_KEY"}, MaxTokensField: "max_completion_tokens"},
-	"openrouter": {BaseURL: "https://openrouter.ai/api/v1", Protocol: OpenAIChatCompletions, Env: []string{"OPENROUTER_API_KEY"}},
-	"google":     {BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai", Protocol: OpenAIChatCompletions, Env: []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}},
-}
+// OpenRouter is the connection a provider named "openrouter" inherits: OpenRouter's chat completions endpoint, keyed by OPENROUTER_API_KEY.
+var OpenRouter = ProviderConfig{BaseURL: "https://openrouter.ai/api/v1", Protocol: OpenAIChatCompletions, Env: []string{"OPENROUTER_API_KEY"}}
 
-// ParseConfig decodes a configuration and applies presets.
+// ParseConfig decodes a configuration and fills the "openrouter" provider from OpenRouter. Every other provider must set a base URL and protocol.
 func ParseConfig(data []byte) (Config, error) {
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return config, fmt.Errorf("model config: %w", err)
 	}
-	for name, provider := range config.Providers {
-		config.Providers[name] = withPreset(name, provider)
-	}
 	if config.Default.Provider == "" || config.Default.ModelID == "" {
 		return config, errors.New("model config: default requires provider and model_id")
 	}
+	if config.Providers == nil {
+		config.Providers = map[string]ProviderConfig{}
+	}
+	if p, ok := config.Providers["openrouter"]; ok || config.Default.Provider == "openrouter" {
+		config.Providers["openrouter"] = withOpenRouter(p)
+	}
 	if _, ok := config.Providers[config.Default.Provider]; !ok {
-		preset, known := Presets[config.Default.Provider]
-		if !known {
-			return config, fmt.Errorf("model config: default provider %q is not configured", config.Default.Provider)
+		return config, fmt.Errorf("model config: default provider %q is not configured", config.Default.Provider)
+	}
+	for name, p := range config.Providers {
+		if p.BaseURL == "" || (p.Protocol != AnthropicMessages && p.Protocol != OpenAIChatCompletions) {
+			return config, fmt.Errorf("model config: provider %q needs baseUrl and protocol %q or %q", name, AnthropicMessages, OpenAIChatCompletions)
 		}
-		if config.Providers == nil {
-			config.Providers = map[string]ProviderConfig{}
-		}
-		config.Providers[config.Default.Provider] = preset
 	}
 	return config, nil
 }
 
-func withPreset(name string, p ProviderConfig) ProviderConfig {
-	preset, ok := Presets[name]
-	if !ok {
-		return p
-	}
+func withOpenRouter(p ProviderConfig) ProviderConfig {
 	if p.BaseURL == "" {
-		p.BaseURL = preset.BaseURL
+		p.BaseURL = OpenRouter.BaseURL
 	}
 	if p.Protocol == "" {
-		p.Protocol = preset.Protocol
+		p.Protocol = OpenRouter.Protocol
 	}
 	if len(p.Env) == 0 {
-		p.Env = preset.Env
-	}
-	if p.MaxTokensField == "" {
-		p.MaxTokensField = preset.MaxTokensField
+		p.Env = OpenRouter.Env
 	}
 	return p
 }

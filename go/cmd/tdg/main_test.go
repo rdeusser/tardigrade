@@ -65,13 +65,16 @@ func TestServeAndCallAgent(t *testing.T) {
 		}
 		return out.String()
 	}
-	if methods := tdg("methods"); !strings.Contains(methods, `"name": "message"`) {
-		t.Fatalf("methods = %s", methods)
+	if actors := tdg("actors"); !strings.Contains(actors, `"name": "message"`) {
+		t.Fatalf("actors = %s", actors)
 	}
 	tdg("thread", "create", "t1")
 	result := tdg("call", "t1", "message", `{"text":"hi"}`, "--id", "c1", "--wait")
-	if !strings.Contains(result, `"status": "completed"`) || !strings.Contains(result, `hello there`) {
+	if !strings.Contains(result, `"status": "CALL_STATUS_COMPLETED"`) || !strings.Contains(result, `hello there`) {
 		t.Fatalf("call = %s", result)
+	}
+	if state := tdg("state", "t1", "c1"); !strings.Contains(state, `"method": "message"`) {
+		t.Fatalf("state = %s", state)
 	}
 	if events := tdg("events", "t1"); !strings.Contains(events, "TurnFinished") {
 		t.Fatalf("events = %s", events)

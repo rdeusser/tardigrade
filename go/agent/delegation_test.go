@@ -40,26 +40,32 @@ func (r *router) Generate(_ context.Context, req model.Request, _ func(model.Del
 	return text("unexpected"), nil
 }
 
-func TestDelegationReturnsChildAnswerAsTurn(t *testing.T) {
+func TestDelegationToAnotherActorReturnsAnswerAsTurn(t *testing.T) {
 	store, err := sqlite.Open(filepath.Join(t.TempDir(), "host.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	toMessage := func(message string) any { return agent.MessageInput{Text: message} }
-	actor := agent.New(agent.Options{Name: "researcher", System: "Research.", Model: ref, ContextWindowTokens: 100_000, Tools: library.Specs(library.Agents(nil, toMessage))})
+	lead := agent.New(agent.Options{Name: "lead", System: "Lead.", Model: ref, ContextWindowTokens: 100_000, Tools: library.Specs(library.Agents(nil, "researcher", toMessage))})
+	researcher := agent.New(agent.Options{Name: "researcher", System: "Research.", Model: ref, ContextWindowTokens: 100_000})
 	fake := &router{}
-	h, err := host.New(host.Options{Actor: actor, Store: store, Handlers: func(h *host.Host, _ tardigrade.ThreadCoordinate) []tardigrade.Handler {
-		return agent.Handlers(agent.Services{Model: fake, Tools: library.NewRegistry(library.Agents(h, toMessage))})
+	h, err := host.New(host.Options{Actors: []*tardigrade.Actor{lead, researcher}, Store: store, Handlers: func(h *host.Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler {
+		services := agent.Services{Model: fake}
+		if address.Actor == "lead" {
+			services.Tools = library.NewRegistry(library.Agents(h, "researcher", toMessage))
+		}
+		return agent.Handlers(services)
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	if _, err := h.CreateThread("main", "lead", ""); err != nil {
+	address, err := h.CreateThread("lead", "main", "t1", nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	rt, _ := h.Thread("main", "lead")
+	rt, _ := h.Thread(address)
 	input, _ := json.Marshal(agent.MessageInput{Text: "research tardigrades"})
 	if err := rt.Invoke("message", "m1", tardigrade.Sender{Kind: "external", ID: "test"}, input); err != nil {
 		t.Fatal(err)
@@ -80,8 +86,8 @@ func TestDelegationReturnsChildAnswerAsTurn(t *testing.T) {
 			t.Fatalf("turns = %+v; status %+v; model saw %v", turns, rt.Status(), fake.seen)
 		}
 	}
-	threads, _ := h.Threads("main")
-	if len(threads) != 2 || threads[1].Parent != "lead" {
+	threads, _ := h.Threads("researcher", "main")
+	if len(threads) != 1 || threads[0].Parent == nil || *threads[0].Parent != address {
 		t.Fatalf("threads = %+v", threads)
 	}
 }

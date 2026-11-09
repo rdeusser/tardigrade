@@ -46,14 +46,14 @@ func loadConfig() (model.Config, error) {
 	return model.ParseConfig(data)
 }
 
-// libraries returns the tools of the served agent; workspace and delegator may be nil when only specs are needed.
-func libraries(workspace library.Workspace, delegator library.Delegator) []library.Library {
+// libraries returns the tools of the served agent, whose child agents are threads of the same actor; workspace and delegator may be nil when only specs are needed.
+func libraries(actor string, workspace library.Workspace, delegator library.Delegator) []library.Library {
 	return []library.Library{
 		library.Filesystem(workspace),
 		library.Fetch(nil, 0),
 		library.Notes(0),
 		library.Alarm(),
-		library.Agents(delegator, func(message string) any { return agent.MessageInput{Text: message} }),
+		library.Agents(delegator, actor, func(message string) any { return agent.MessageInput{Text: message} }),
 	}
 }
 
@@ -72,26 +72,18 @@ func serve(ctx context.Context, flags *flag.FlagSet, args []string, out io.Write
 	}
 	window := config.ContextWindow(config.Default)
 	if window == 0 {
-		lookup, cancel := context.WithTimeout(ctx, 10*time.Second)
-		catalog, err := model.FetchCatalog(lookup, nil, env("TARDIGRADE_MODEL_CATALOG_URL", model.DefaultCatalogURL))
-		cancel()
-		if err == nil {
-			window = catalog.ContextWindow(config.Default)
-		}
-		if window == 0 {
-			return fmt.Errorf("context window of %s is unknown; set providers.%s.models.%q.contextWindowTokens", config.Default, config.Default.Provider, config.Default.ModelID)
-		}
+		return fmt.Errorf("set providers.%s.models.%q.contextWindowTokens to the context window of %s", config.Default.Provider, config.Default.ModelID, config.Default)
 	}
 	store, err := sqlite.Open(filepath.Join(*data, "host.sqlite"))
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	actor := agent.New(agent.Options{Name: *name, System: *system, Model: config.Default, ContextWindowTokens: window, Tools: library.Specs(libraries(nil, nil)...)})
+	actor := agent.New(agent.Options{Name: *name, System: *system, Model: config.Default, ContextWindowTokens: window, Tools: library.Specs(libraries(*name, nil, nil)...)})
 	router := &model.Router{Config: config}
-	h, err := host.New(host.Options{Actor: actor, Store: store, Handlers: func(h *host.Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler {
+	h, err := host.New(host.Options{Actors: []*tardigrade.Actor{actor}, Store: store, Handlers: func(h *host.Host, address tardigrade.ThreadCoordinate) []tardigrade.Handler {
 		dir := library.LocalWorkspace{Dir: filepath.Join(*workspace, address.Instance, address.Thread)}
-		return agent.Handlers(agent.Services{Model: router, Tools: library.NewRegistry(libraries(dir, h)...)})
+		return agent.Handlers(agent.Services{Model: router, Tools: library.NewRegistry(libraries(*name, dir, h)...)})
 	}})
 	if err != nil {
 		return err
@@ -101,7 +93,10 @@ func serve(ctx context.Context, flags *flag.FlagSet, args []string, out io.Write
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: h.Handler(host.HTTPOptions{Token: os.Getenv("TARDIGRADE_TOKEN")}), ReadHeaderTimeout: 10 * time.Second}
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	server := &http.Server{Handler: h.Handler(host.HandlerOptions{Token: os.Getenv("TARDIGRADE_TOKEN")}), ReadHeaderTimeout: 10 * time.Second, Protocols: &protocols}
 	fmt.Fprintf(out, "%s serving %s on http://%s\n", *name, config.Default, listener.Addr())
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()

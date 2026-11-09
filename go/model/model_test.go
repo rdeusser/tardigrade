@@ -146,7 +146,7 @@ func TestStalledStreamTimesOut(t *testing.T) {
 	}
 }
 
-func TestParseConfigAppliesPresets(t *testing.T) {
+func TestParseConfigFillsOpenRouter(t *testing.T) {
 	config, err := ParseConfig([]byte(`{"default":{"provider":"openrouter","model_id":"anthropic/claude-sonnet-4.6"},"providers":{"openrouter":{"models":{"anthropic/claude-sonnet-4.6":{"contextWindowTokens":200000}}}}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -157,5 +157,15 @@ func TestParseConfigAppliesPresets(t *testing.T) {
 	}
 	if config.ContextWindow(config.Default) != 200000 {
 		t.Fatal("context window missing")
+	}
+}
+
+func TestParseConfigRequiresConnectionOutsideOpenRouter(t *testing.T) {
+	local := `{"default":{"provider":"local","model_id":"m"},"providers":{"local":{"baseUrl":"http://127.0.0.1:8080","protocol":"anthropic-messages"}}}`
+	if _, err := ParseConfig([]byte(local)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseConfig([]byte(`{"default":{"provider":"anthropic","model_id":"m"},"providers":{"anthropic":{}}}`)); err == nil {
+		t.Fatal("provider without baseUrl accepted")
 	}
 }

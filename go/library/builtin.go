@@ -383,14 +383,14 @@ func Alarm() Library {
 	)
 }
 
-// Delegator runs method calls on child threads, as host.Host does.
+// Delegator runs method calls on child threads, which may belong to another actor, as host.Host does.
 type Delegator interface {
-	Delegate(parent tardigrade.ThreadCoordinate, ref tardigrade.Ref, method string, input any) (tardigrade.Handle, error)
+	Delegate(parent tardigrade.ThreadCoordinate, ref tardigrade.Ref, actor, method string, input any) (tardigrade.Handle, error)
 	CancelDelegation(handle tardigrade.Handle, reason string) error
 }
 
-// Agents declares delegation of work to child agents through their "message" method; input builds that method's input from the delegated text.
-func Agents(d Delegator, input func(message string) any) Library {
+// Agents declares delegation of work to child threads of actor through its "message" method; input builds that method's input from the delegated text.
+func Agents(d Delegator, actor string, input func(message string) any) Library {
 	type run struct {
 		Message string `json:"message"`
 	}
@@ -399,7 +399,7 @@ func Agents(d Delegator, input func(message string) any) Library {
 	}
 	return New("agents", "Delegate work to child agents.",
 		Task("run", "Start a child agent with a message. Returns a durable handle immediately; its result arrives in the inbox.", func(c Call, in run) (tardigrade.Handle, error) {
-			return d.Delegate(c.X.Address(), c.X.Ref(), "message", input(in.Message))
+			return d.Delegate(c.X.Address(), c.X.Ref(), actor, "message", input(in.Message))
 		}, Named("delegate_task"), Hints(Annotations{ReadOnlyHint: new(false), OpenWorldHint: new(true)}), OnCancel(func(c tardigrade.Cleanup, _ Call) error {
 			if c.Handle == nil {
 				return nil

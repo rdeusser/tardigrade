@@ -243,13 +243,13 @@ type ThreadCoordinate struct {
 	Thread   string `json:"thread"`
 }
 
-// ThreadInfo is a thread directory entry.
+// ThreadInfo is a thread directory entry. A thread with a Parent was created by delegation from it; the parent may belong to another actor.
 type ThreadInfo struct {
-	Address   ThreadCoordinate `json:"address"`
-	Parent    string           `json:"parent,omitempty"`
-	Depth     int              `json:"depth"`
-	CreatedAt int64            `json:"createdAt"`
-	Active    bool             `json:"active"`
+	Address   ThreadCoordinate  `json:"address"`
+	Parent    *ThreadCoordinate `json:"parent,omitempty"`
+	Depth     int               `json:"depth"`
+	CreatedAt int64             `json:"createdAt"`
+	Active    bool              `json:"active"`
 }
 
 // ThreadCreated is the first record of a thread's journal.

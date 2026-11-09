@@ -136,7 +136,7 @@ func TestCounterNotifiesThroughAct(t *testing.T) {
 	if got := tardigrade.Read(rt, notified); !slices.Equal(got, []int{2}) {
 		t.Fatalf("notified = %v", got)
 	}
-	state, err := rt.Call("increment", "b")
+	state, err := rt.Call("b")
 	if err != nil || state.Status != tardigrade.StatusCompleted || string(state.Output) != "2" {
 		t.Fatalf("call state = %+v, %v", state, err)
 	}
@@ -298,7 +298,7 @@ func TestPanicStopsActor(t *testing.T) {
 	if err := rt.Invoke("increment", "c", external, []byte("{}")); !errors.As(err, &stopped) {
 		t.Fatalf("invoke after defect = %v", err)
 	}
-	state, _ := rt.Call("increment", "b")
+	state, _ := rt.Call("b")
 	if state.Status != tardigrade.StatusCompleted {
 		t.Fatalf("settled call state = %+v", state)
 	}

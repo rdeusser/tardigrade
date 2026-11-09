@@ -16,7 +16,7 @@ import (
 const schema = `
 CREATE TABLE IF NOT EXISTS threads (
 	actor TEXT NOT NULL, instance TEXT NOT NULL, thread TEXT NOT NULL,
-	parent TEXT, depth INTEGER NOT NULL, created_at INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 0,
+	parent_actor TEXT, parent_instance TEXT, parent_thread TEXT, depth INTEGER NOT NULL, created_at INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (actor, instance, thread)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS events (
 	actor TEXT NOT NULL, instance TEXT NOT NULL, thread TEXT NOT NULL, seq INTEGER NOT NULL,
@@ -62,12 +62,12 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // CreateThread records a thread unless it exists and reports whether it was created.
 func (s *Store) CreateThread(info tardigrade.ThreadInfo) (bool, error) {
-	var parent any
-	if info.Parent != "" {
-		parent = info.Parent
+	var parent [3]any
+	if p := info.Parent; p != nil {
+		parent = [3]any{p.Actor, p.Instance, p.Thread}
 	}
-	result, err := s.db.Exec(`INSERT INTO threads (actor, instance, thread, parent, depth, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-		info.Address.Actor, info.Address.Instance, info.Address.Thread, parent, info.Depth, info.CreatedAt)
+	result, err := s.db.Exec(`INSERT INTO threads (actor, instance, thread, parent_actor, parent_instance, parent_thread, depth, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+		info.Address.Actor, info.Address.Instance, info.Address.Thread, parent[0], parent[1], parent[2], info.Depth, info.CreatedAt)
 	if err != nil {
 		return false, err
 	}
@@ -75,36 +75,45 @@ func (s *Store) CreateThread(info tardigrade.ThreadInfo) (bool, error) {
 	return created == 1, err
 }
 
+const threadColumns = `actor, instance, thread, parent_actor, parent_instance, parent_thread, depth, created_at, active`
+
+type scanner interface{ Scan(...any) error }
+
+func scanThread(row scanner) (tardigrade.ThreadInfo, error) {
+	var info tardigrade.ThreadInfo
+	var actor, instance, thread sql.NullString
+	err := row.Scan(&info.Address.Actor, &info.Address.Instance, &info.Address.Thread, &actor, &instance, &thread, &info.Depth, &info.CreatedAt, &info.Active)
+	if thread.Valid {
+		info.Parent = &tardigrade.ThreadCoordinate{Actor: actor.String, Instance: instance.String, Thread: thread.String}
+	}
+	return info, err
+}
+
 // Thread returns a directory entry or nil when the thread does not exist.
 func (s *Store) Thread(address tardigrade.ThreadCoordinate) (*tardigrade.ThreadInfo, error) {
-	row := s.db.QueryRow(`SELECT parent, depth, created_at, active FROM threads WHERE actor = ? AND instance = ? AND thread = ?`, address.Actor, address.Instance, address.Thread)
-	info := tardigrade.ThreadInfo{Address: address}
-	var parent sql.NullString
-	if err := row.Scan(&parent, &info.Depth, &info.CreatedAt, &info.Active); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
+	info, err := scanThread(s.db.QueryRow(`SELECT `+threadColumns+` FROM threads WHERE actor = ? AND instance = ? AND thread = ?`, address.Actor, address.Instance, address.Thread))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	info.Parent = parent.String
 	return &info, nil
 }
 
-// Threads lists an instance's threads in creation order; an empty instance lists every instance.
+// Threads lists threads in creation order. An empty actor lists every actor and an empty instance lists every instance.
 func (s *Store) Threads(actor, instance string) ([]tardigrade.ThreadInfo, error) {
-	rows, err := s.db.Query(`SELECT instance, thread, parent, depth, created_at, active FROM threads WHERE actor = ? AND (? = '' OR instance = ?) ORDER BY created_at, thread`, actor, instance, instance)
+	rows, err := s.db.Query(`SELECT `+threadColumns+` FROM threads WHERE (?1 = '' OR actor = ?1) AND (?2 = '' OR instance = ?2) ORDER BY created_at, actor, instance, thread`, actor, instance)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var threads []tardigrade.ThreadInfo
 	for rows.Next() {
-		info := tardigrade.ThreadInfo{Address: tardigrade.ThreadCoordinate{Actor: actor}}
-		var parent sql.NullString
-		if err := rows.Scan(&info.Address.Instance, &info.Address.Thread, &parent, &info.Depth, &info.CreatedAt, &info.Active); err != nil {
+		info, err := scanThread(rows)
+		if err != nil {
 			return nil, err
 		}
-		info.Parent = parent.String
 		threads = append(threads, info)
 	}
 	return threads, rows.Err()

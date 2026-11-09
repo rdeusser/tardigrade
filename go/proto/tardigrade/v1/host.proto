@@ -1,0 +1,238 @@
+syntax = "proto3";
+
+package tardigrade.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// HostService runs actors' threads. Every thread belongs to one actor and one instance of it; method calls, journals, and live updates are addressed by ThreadRef.
+service HostService {
+  // ListActors returns the actors the host serves and their methods.
+  rpc ListActors(ListActorsRequest) returns (ListActorsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CreateThread allocates a thread. Creating a thread whose name exists returns the existing thread, so a retried request is absorbed.
+  rpc CreateThread(CreateThreadRequest) returns (CreateThreadResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  // ListThreads returns an instance's threads in creation order.
+  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // StartCall journals a method call under a caller-chosen call ID. Repeating a call with the same ID and input is absorbed; reusing the ID with other input fails with ABORTED.
+  rpc StartCall(StartCallRequest) returns (StartCallResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  // GetCall returns a call's current state.
+  rpc GetCall(GetCallRequest) returns (GetCallResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // WatchCall streams a call's state, first as it is and then after each change, and ends once the call finishes.
+  rpc WatchCall(WatchCallRequest) returns (stream WatchCallResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // CancelCall asks a cancellable call to stop. Repeating the request is absorbed.
+  rpc CancelCall(CancelCallRequest) returns (CancelCallResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  // ListRecords returns journal records after a position.
+  rpc ListRecords(ListRecordsRequest) returns (ListRecordsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // WatchRecords streams journal records after a position, then each new record as it is committed.
+  rpc WatchRecords(WatchRecordsRequest) returns (stream WatchRecordsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // WatchUpdates streams transient execution updates, such as model text, produced after the stream opens. Updates are never journaled.
+  rpc WatchUpdates(WatchUpdatesRequest) returns (stream WatchUpdatesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// ThreadRef addresses one thread of one actor instance.
+message ThreadRef {
+  string actor = 1;
+  string instance = 2;
+  string thread = 3;
+}
+
+// Actor is an actor definition the host serves.
+message Actor {
+  string name = 1;
+  repeated Method methods = 2;
+}
+
+// Method describes one method of an actor. Its input and output are JSON values described by JSON Schemas.
+message Method {
+  string name = 1;
+  bool cancellable = 2;
+  google.protobuf.Struct input_schema = 3;
+  google.protobuf.Struct output_schema = 4;
+}
+
+// Thread is a thread directory entry. A thread with a parent was created by delegation from it; the parent may belong to another actor.
+message Thread {
+  ThreadRef ref = 1;
+  ThreadRef parent = 2;
+  int32 depth = 3;
+  google.protobuf.Timestamp create_time = 4;
+  // active is set while the thread holds unfinished work.
+  bool active = 5;
+}
+
+// CallStatus is the state of a method call.
+enum CallStatus {
+  CALL_STATUS_UNSPECIFIED = 0;
+  CALL_STATUS_PENDING = 1;
+  CALL_STATUS_COMPLETED = 2;
+  CALL_STATUS_FAILED = 3;
+  CALL_STATUS_CANCELLED = 4;
+}
+
+// Call is a method call and, once it finishes, its result.
+message Call {
+  ThreadRef thread = 1;
+  string id = 2;
+  string method = 3;
+  CallStatus status = 4;
+  oneof result {
+    // output is the method's output when status is CALL_STATUS_COMPLETED.
+    google.protobuf.Value output = 5;
+    // error explains a CALL_STATUS_FAILED call.
+    string error = 6;
+    // cancel_reason explains a CALL_STATUS_CANCELLED call.
+    string cancel_reason = 7;
+  }
+}
+
+// Record is one journal entry. seq is the one-based journal position and event is the event's JSON object, whose "type" field names it.
+message Record {
+  int64 seq = 1;
+  string type = 2;
+  google.protobuf.Struct event = 3;
+  google.protobuf.Timestamp record_time = 4;
+  // message_id is set on records delivered as messages: a method call carries its call ID, and a cancellation carries "cancel:" followed by the call ID.
+  string message_id = 5;
+}
+
+// EffectRef identifies accepted work by the journal position that accepted it, the effect atom that proposed it, and its act.
+message EffectRef {
+  int64 seq = 1;
+  string atom = 2;
+  string act = 3;
+}
+
+// Update is a transient execution update. sequence orders updates within one attempt of the work.
+message Update {
+  ThreadRef thread = 1;
+  EffectRef effect = 2;
+  string attempt_id = 3;
+  int32 sequence = 4;
+  google.protobuf.Value payload = 5;
+}
+
+message ListActorsRequest {}
+
+message ListActorsResponse {
+  repeated Actor actors = 1;
+}
+
+message CreateThreadRequest {
+  string actor = 1;
+  string instance = 2;
+  // name identifies the thread; an empty name is generated.
+  string name = 3;
+  // parent, when set, is the thread the new thread is a child of.
+  ThreadRef parent = 4;
+}
+
+message CreateThreadResponse {
+  Thread thread = 1;
+}
+
+message ListThreadsRequest {
+  string actor = 1;
+  // instance filters threads; an empty instance lists every instance.
+  string instance = 2;
+}
+
+message ListThreadsResponse {
+  repeated Thread threads = 1;
+}
+
+message StartCallRequest {
+  ThreadRef thread = 1;
+  string method = 2;
+  string call_id = 3;
+  google.protobuf.Value input = 4;
+}
+
+message StartCallResponse {
+  Call call = 1;
+}
+
+message GetCallRequest {
+  ThreadRef thread = 1;
+  string call_id = 2;
+}
+
+message GetCallResponse {
+  Call call = 1;
+}
+
+message WatchCallRequest {
+  ThreadRef thread = 1;
+  string call_id = 2;
+}
+
+message WatchCallResponse {
+  Call call = 1;
+}
+
+message CancelCallRequest {
+  ThreadRef thread = 1;
+  string call_id = 2;
+  string reason = 3;
+}
+
+message CancelCallResponse {
+  Call call = 1;
+}
+
+message ListRecordsRequest {
+  ThreadRef thread = 1;
+  // after is a one-based position; records after it are returned.
+  int64 after = 2;
+  // limit bounds the records returned; zero returns every record after the position.
+  int32 limit = 3;
+}
+
+message ListRecordsResponse {
+  repeated Record records = 1;
+}
+
+message WatchRecordsRequest {
+  ThreadRef thread = 1;
+  int64 after = 2;
+}
+
+message WatchRecordsResponse {
+  Record record = 1;
+}
+
+message WatchUpdatesRequest {
+  ThreadRef thread = 1;
+}
+
+message WatchUpdatesResponse {
+  Update update = 1;
+}

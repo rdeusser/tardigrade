@@ -79,12 +79,12 @@ func (h *harness) say(id, text string) {
 	}
 }
 
-func (h *harness) await(id string) tardigrade.MethodState {
+func (h *harness) await(id string) tardigrade.CallState {
 	h.t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
 		changed := h.rt.Changed()
-		state, err := h.rt.Call("message", id)
+		state, err := h.rt.Call(id)
 		if err != nil {
 			h.t.Fatal(err)
 		}
@@ -112,7 +112,7 @@ func (h *harness) types() []string {
 	return names
 }
 
-func output(t *testing.T, state tardigrade.MethodState) string {
+func output(t *testing.T, state tardigrade.CallState) string {
 	t.Helper()
 	var out agent.MessageOutput
 	if state.Status != tardigrade.StatusCompleted || json.Unmarshal(state.Output, &out) != nil {
@@ -221,7 +221,7 @@ func TestCancellationStopsTurn(t *testing.T) {
 	})
 	h.say("m1", "slow")
 	<-started
-	if err := h.rt.CancelCall("message", "m1", "user stopped", tardigrade.Sender{Kind: "external", ID: "test"}); err != nil {
+	if err := h.rt.CancelCall("m1", "user stopped", tardigrade.Sender{Kind: "external", ID: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	if state := h.await("m1"); state.Status != tardigrade.StatusCancelled || state.Reason != "user stopped" {
